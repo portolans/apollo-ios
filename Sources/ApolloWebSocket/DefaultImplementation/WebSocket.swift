@@ -1012,7 +1012,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
           }
         }
       }
-      readStack.removeLast()
+      _ = readStack.popLast() // we need to remove the last since we just processed it, but there is no locking between here and doDisconnect, so avoid crashing if the stack is empty.
       return true
     }
     return false
