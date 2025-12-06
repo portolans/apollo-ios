@@ -1012,7 +1012,9 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
           }
         }
       }
-      _ = readStack.popLast() // we need to remove the last since we just processed it, but there is no locking between here and doDisconnect, so avoid crashing if the stack is empty.
+      serialQueue.async { [self] in
+        _ = readStack.popLast()
+      }
       return true
     }
     return false
