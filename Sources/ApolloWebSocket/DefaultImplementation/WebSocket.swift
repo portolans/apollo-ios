@@ -225,11 +225,13 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
     return canWork
   }
 
-  private func inQueue<Success>(work: () -> Success) -> Success {
+  private func inQueue(
+    work: @escaping () -> Void
+  ) {
     if DispatchQueue.getSpecific(key: serialQueueSpecificKey) != nil {
       work()
     } else {
-      serialQueue.sync { work() }
+      serialQueue.async(execute: work)
     }
   }
 
@@ -580,9 +582,9 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
   private func cleanupStream() {
     stream.cleanup()
     inQueue {
-      fragBuffer = nil
-      inputQueue.removeAll()
-      readStack.removeAll()
+      self.fragBuffer = nil
+      self.inputQueue.removeAll()
+      self.readStack.removeAll()
     }
   }
 
@@ -1127,15 +1129,15 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
     */
   private func doDisconnect(_ error: (any Error)?) {
     inQueue {
-      guard !didDisconnect else { return }
-      readStack = []
-      didDisconnect = true
-      isConnecting = false
-      mutex.lock()
-      connected = false
-      mutex.unlock()
-      guard canDispatch else {return}
-      callbackQueue.async { [weak self] in
+      guard !self.didDisconnect else { return }
+      self.readStack = []
+      self.didDisconnect = true
+      self.isConnecting = false
+      self.mutex.lock()
+      self.connected = false
+      self.mutex.unlock()
+      guard self.canDispatch else { return }
+      self.callbackQueue.async { [weak self] in
         guard let self = self else { return }
         self.onDisconnect?(error)
         self.delegate?.websocketDidDisconnect(socket: self, error: error)
