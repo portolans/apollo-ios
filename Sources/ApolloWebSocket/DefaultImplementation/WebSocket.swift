@@ -208,6 +208,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
   private var isConnecting = false
   private let mutex = NSLock()
   private let serialQueue = DispatchQueue(label: "com.apollographql.WebSocket.serial", qos: .background)
+  private let serialQueueSpecificKey = DispatchSpecificKey<Void>()
   private var compressionState = CompressionState()
   private var writeQueue = OperationQueue()
   private var readStack = [WSResponse]()
@@ -224,6 +225,16 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
     return canWork
   }
 
+  private func inQueue(
+    work: @escaping () -> Void
+  ) {
+    if DispatchQueue.getSpecific(key: serialQueueSpecificKey) != nil {
+      work()
+    } else {
+      serialQueue.async(execute: work)
+    }
+  }
+
   /// Designated initializer.
   ///
   /// - Parameters:
@@ -232,6 +243,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
   public init(request: URLRequest, protocol: WSProtocol) {
     self.request = request
     self.stream = FoundationStream()
+    serialQueue.setSpecific(key: serialQueueSpecificKey, value: ())
     if request.value(forHTTPHeaderField: Constants.headerOriginName) == nil {
       guard let url = request.url else {return}
       var origin = url.absoluteString
@@ -279,7 +291,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
    Connect to the WebSocket server on a background thread.
    */
   public func connect() {
-    serialQueue.sync {
+    inQueue {
       guard !self.isConnecting else { return }
       self.didDisconnect = false
       self.isConnecting = true
@@ -534,11 +546,15 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
    */
 
   public func newBytesInStream() {
-    processInputStream()
+    serialQueue.async {
+      self.processInputStream()
+    }
   }
 
   public func streamDidError(error: (any Error)?) {
-    disconnectStream(error)
+    serialQueue.async {
+      self.disconnectStream(error)
+    }
   }
 
   /**
@@ -551,8 +567,8 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
       writeQueue.cancelAllOperations()
     }
 
-    mutex.lock()
     cleanupStream()
+    mutex.lock()
     connected = false
     mutex.unlock()
     if runDelegate {
@@ -565,7 +581,11 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
    */
   private func cleanupStream() {
     stream.cleanup()
-    fragBuffer = nil
+    inQueue {
+      self.fragBuffer = nil
+      self.inputQueue.removeAll()
+      self.readStack.removeAll()
+    }
   }
 
   /**
@@ -1012,9 +1032,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
           }
         }
       }
-      serialQueue.async { [self] in
-        _ = readStack.popLast()
-      }
+      _ = readStack.popLast()
       return true
     }
     return false
@@ -1110,15 +1128,15 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
    Used to preform the disconnect delegate
    */
   private func doDisconnect(_ error: (any Error)?) {
-    serialQueue.sync {
+    inQueue {
       guard !self.didDisconnect else { return }
-      readStack = []
+      self.readStack = []
       self.didDisconnect = true
       self.isConnecting = false
       self.mutex.lock()
       self.connected = false
       self.mutex.unlock()
-      guard self.canDispatch else {return}
+      guard self.canDispatch else { return }
       self.callbackQueue.async { [weak self] in
         guard let self = self else { return }
         self.onDisconnect?(error)
