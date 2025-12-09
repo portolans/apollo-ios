@@ -208,6 +208,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
   private var isConnecting = false
   private let mutex = NSLock()
   private let serialQueue = DispatchQueue(label: "com.apollographql.WebSocket.serial", qos: .background)
+  private let serialQueueSpecificKey = DispatchSpecificKey<Void>()
   private var compressionState = CompressionState()
   private var writeQueue = OperationQueue()
   private var readStack = [WSResponse]()
@@ -232,6 +233,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
   public init(request: URLRequest, protocol: WSProtocol) {
     self.request = request
     self.stream = FoundationStream()
+    serialQueue.setSpecific(key: serialQueueSpecificKey, value: ())
     if request.value(forHTTPHeaderField: Constants.headerOriginName) == nil {
       guard let url = request.url else {return}
       var origin = url.absoluteString
@@ -565,7 +567,18 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
    */
   private func cleanupStream() {
     stream.cleanup()
-    fragBuffer = nil
+    func clearState() {
+      fragBuffer = nil
+      inputQueue.removeAll()
+      readStack.removeAll()
+    }
+    if DispatchQueue.getSpecific(key: serialQueueSpecificKey) != nil {
+      clearState()
+    } else {
+      serialQueue.sync {
+        clearState()
+      }
+    }
   }
 
   /**
