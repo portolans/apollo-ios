@@ -565,8 +565,8 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
       writeQueue.cancelAllOperations()
     }
 
-    mutex.lock()
     cleanupStream()
+    mutex.lock()
     connected = false
     mutex.unlock()
     if runDelegate {
