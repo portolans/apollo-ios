@@ -282,7 +282,6 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
     serialQueue.sync {
       guard !self.isConnecting else { return }
       self.didDisconnect = false
-      self.readStack = []
       self.isConnecting = true
       self.createHTTPRequest()
     }
