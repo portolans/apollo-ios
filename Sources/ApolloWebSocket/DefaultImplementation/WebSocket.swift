@@ -1152,7 +1152,7 @@ public final class WebSocket: NSObject, WebSocketClient, StreamDelegate, WebSock
   deinit {
     mutex.lock()
     readyToWrite = false
-    cleanupStream()
+    stream.cleanup()
     mutex.unlock()
     writeQueue.cancelAllOperations()
   }
