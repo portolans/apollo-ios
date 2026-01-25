@@ -79,8 +79,11 @@ struct CacheDataExecutionSource: GraphQLExecutionSource {
   func computeCacheKey(
     for object: Record,
     in schema: any SchemaMetadata.Type,
-    inferredToImplementInterface interface: Interface?
+    inferredToImplementInterface interface: Interface?,
+    parentCacheKey: String?
   ) -> CacheKey? {
+    // When reading from cache, the record's key is already the fully resolved cache key
+    // (including any parent prefix if scopeToParent was used during write).
     return object.key
   }
 

@@ -13,18 +13,30 @@ public class ObjectExecutionInfo {
   fileprivate(set) var fulfilledFragments: Set<ObjectIdentifier>
   fileprivate(set) var deferredFragments: Set<ObjectIdentifier> = []
 
+  /// This object's own normalized cache key, if it has one.
+  /// For non-normalized objects (path-based caching), this will be `nil`.
+  let ownCacheKey: String?
+
+  /// The nearest normalized parent cache key, if any.
+  /// Used when child objects have `scopeToParent: true` in their `CacheKeyInfo`.
+  let parentCacheKey: String?
+
   fileprivate init(
     rootType: any SelectionSet.Type,
     variables: GraphQLOperation.Variables?,
     schema: (any SchemaMetadata.Type),
     responsePath: ResponsePath,
-    cachePath: ResponsePath
+    cachePath: ResponsePath,
+    ownCacheKey: String? = nil,
+    parentCacheKey: String? = nil
   ) {
     self.rootType = rootType
     self.variables = variables
     self.schema = schema
     self.responsePath = responsePath
     self.cachePath = cachePath
+    self.ownCacheKey = ownCacheKey
+    self.parentCacheKey = parentCacheKey
     self.fulfilledFragments = [ObjectIdentifier(rootType)]
   }
 
@@ -40,6 +52,8 @@ public class ObjectExecutionInfo {
     if let root = root {
       cachePath = [root.key]
     }
+    self.ownCacheKey = nil
+    self.parentCacheKey = nil
     self.fulfilledFragments = [ObjectIdentifier(rootType)]
   }
 
@@ -116,12 +130,19 @@ public class FieldExecutionInfo {
       else { return self.cachePath }
     }()
 
+    // Determine the parentCacheKey for the child:
+    // If the parent object has its own cache key, use that.
+    // Otherwise, pass through the grandparent's cache key.
+    let childParentCacheKey: String? = parentInfo.ownCacheKey ?? parentInfo.parentCacheKey
+
     let childExecutionInfo = ObjectExecutionInfo(
       rootType: rootType,
       variables: parentInfo.variables,
       schema: parentInfo.schema,
       responsePath: responsePath,
-      cachePath: cachePath
+      cachePath: cachePath,
+      ownCacheKey: cacheKey,
+      parentCacheKey: childParentCacheKey
     )
     var childSelections: [Selection] = []
 
@@ -494,13 +515,18 @@ public final class GraphQLExecutor<Source: GraphQLExecutionSource> {
     accumulator: Accumulator
   ) -> PossiblyDeferred<Accumulator.PartialResult> {
     let expectedInterface = rootSelectionSetType.__parentType as? Interface
-    
+
+    // Determine the parent cache key for the child object.
+    // This is the parent's own cache key if it has one, or passed through from ancestors.
+    let parentCacheKey = fieldInfo.parentInfo.ownCacheKey ?? fieldInfo.parentInfo.parentCacheKey
+
     let (childExecutionInfo, selections) = fieldInfo.computeChildExecutionData(
       withRootType: rootSelectionSetType,
       cacheKey: executionSource.computeCacheKey(
         for: object,
         in: fieldInfo.parentInfo.schema,
-        inferredToImplementInterface: expectedInterface
+        inferredToImplementInterface: expectedInterface,
+        parentCacheKey: parentCacheKey
       )
     )
     

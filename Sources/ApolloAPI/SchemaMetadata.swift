@@ -72,25 +72,57 @@ extension SchemaMetadata {
     for object: ObjectData,
     inferredToImplementInterface implementedInterface: Interface? = nil
   ) -> String? {
+    return cacheKey(
+      for: object,
+      inferredToImplementInterface: implementedInterface,
+      parentCacheKey: nil
+    )
+  }
+
+  /// Resolves the cache key for an object in a GraphQL response to be used by
+  /// `NormalizedCache` mechanisms, optionally scoping to a parent cache key.
+  ///
+  /// When the object's ``CacheKeyInfo/scopeToParent`` is `true` and a `parentCacheKey` is provided,
+  /// the resulting cache key will be prefixed with the parent cache key, creating a scoped cache entry.
+  ///
+  /// - Parameters:
+  ///   - object: A ``JSONObject`` dictionary representing an object in a GraphQL response.
+  ///   - implementedInterface: An optional ``Interface`` that the object is inferred to implement.
+  ///   - parentCacheKey: The nearest normalized parent cache key, if any.
+  ///
+  /// - Returns: A `String` representing the cache key for the `object` to be used by
+  /// `NormalizedCache` mechanisms.
+  @inlinable public static func cacheKey(
+    for object: ObjectData,
+    inferredToImplementInterface implementedInterface: Interface? = nil,
+    parentCacheKey: String?
+  ) -> String? {
     guard let type = graphQLType(for: object) else { return nil }
-    
+
     if let info = configuration.cacheKeyInfo(for: type, object: object) {
-      return "\(info.uniqueKeyGroup ?? type.typename):\(info.id)"
+      let baseCacheKey = "\(info.uniqueKeyGroup ?? type.typename):\(info.id)"
+
+      // If scopeToParent is true and we have a parent cache key, prepend it
+      if info.scopeToParent, let parentCacheKey = parentCacheKey {
+        return "\(parentCacheKey).\(baseCacheKey)"
+      }
+
+      return baseCacheKey
     }
-    
+
     guard let keyFields = type.keyFields ?? implementedInterface?.keyFields else { return nil }
-    
+
     let idValues = try? keyFields.map {
       guard let keyFieldValue = object[$0] else {
         throw JSONDecodingError.missingValue
       }
       let item = try String(_jsonValue: keyFieldValue._asAnyHashable)
-      
+
       // Escape all instances of `+` with a backslash, as well as other backslashes
       return item.replacingOccurrences(of: "\\", with: "\\\\")
         .replacingOccurrences(of: "+", with: "\\+")
     }
-    
+
     guard let id = idValues?.joined(separator: "+") else { return nil }
     return "\(type.typename):\(id)"
   }

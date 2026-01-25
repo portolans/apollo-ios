@@ -85,6 +85,28 @@ public struct CacheKeyInfo {
   /// types.
   public let uniqueKeyGroup: String?
 
+  /// When `true`, the cache key for this object will include the nearest parent's normalized
+  /// cache key as a prefix, scoping this object's cache entry to its parent context.
+  ///
+  /// This is useful when the same object (by ID) can have different data depending on the
+  /// context in which it's fetched. For example, a `User` object might have different computed
+  /// fields when fetched under different `Organization` parents.
+  ///
+  /// ## Example
+  /// Without `scopeToParent`:
+  /// - `User:123` is stored at cache key `"User:123"` regardless of parent
+  ///
+  /// With `scopeToParent: true`:
+  /// - `User:123` under `Organization:1` → `"Organization:1.User:123"`
+  /// - `User:123` under `Organization:2` → `"Organization:2.User:123"`
+  ///
+  /// If there is no normalized parent (e.g., the object is directly under `QUERY_ROOT`),
+  /// the cache key falls back to just the object's own key (e.g., `"User:123"`).
+  ///
+  /// > Note: Only the **nearest** normalized parent cache key is included, not the full
+  /// ancestor chain.
+  public let scopeToParent: Bool
+
   /// A convenience initializer for creating a ``CacheKeyInfo`` from the value of a field on a
   /// ``JSONObject`` dictionary representing a GraphQL response object.
   ///
@@ -98,12 +120,20 @@ public struct CacheKeyInfo {
   ///                This must be a scalar type to be used as a cache id. 
   ///   - uniqueKeyGroup: An optional ``uniqueKeyGroup`` for the ``CacheKeyInfo``.
   ///     Defaults to `nil`.
-  @inlinable public init(jsonValue: (any ScalarType)?, uniqueKeyGroup: String? = nil) throws {
+  @inlinable public init(
+    jsonValue: (any ScalarType)?,
+    uniqueKeyGroup: String? = nil,
+    scopeToParent: Bool = false
+  ) throws {
     guard let jsonValue = jsonValue else {
       throw JSONDecodingError.missingValue
     }
 
-    self.init(id: try String(_jsonValue: jsonValue._asAnyHashable), uniqueKeyGroup: uniqueKeyGroup)
+    self.init(
+      id: try String(_jsonValue: jsonValue._asAnyHashable),
+      uniqueKeyGroup: uniqueKeyGroup,
+      scopeToParent: scopeToParent
+    )
   }
 
   /// The Designated Initializer
@@ -112,8 +142,11 @@ public struct CacheKeyInfo {
   ///   - id: The unique cache key for the response object for the ``CacheKeyInfo``.
   ///   - uniqueKeyGroup: An optional identifier for a group of objects that should be grouped
   ///     together in the `NormalizedCache`.
-  public init(id: String, uniqueKeyGroup: String? = nil) {
+  ///   - scopeToParent: When `true`, the cache key will include the nearest parent's normalized
+  ///     cache key as a prefix. Defaults to `false`.
+  public init(id: String, uniqueKeyGroup: String? = nil, scopeToParent: Bool = false) {
     self.id = id
     self.uniqueKeyGroup = uniqueKeyGroup
+    self.scopeToParent = scopeToParent
   }
 }

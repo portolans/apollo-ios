@@ -44,13 +44,16 @@ public protocol GraphQLExecutionSource {
   ///     inferred to implement. If the cache key is being resolved for a selection set with an
   ///     interface as it's `__parentType`, you can infer the object must implement that interface.
   ///     You should provide that interface to this parameter.
+  ///   - parentCacheKey: The nearest normalized parent cache key, if any. Used when the object's
+  ///     ``CacheKeyInfo/scopeToParent`` is `true` to create parent-scoped cache keys.
   /// - Returns: A cache key for normalizing the object in the cache. If `nil` is returned the
   /// object is assumed to be stored in the cache with no normalization. The executor will
   /// construct a cache key based on the object's path in its enclosing operation.
   func computeCacheKey(
     for object: RawObjectData,
     in schema: any SchemaMetadata.Type,
-    inferredToImplementInterface implementedInterface: Interface?
+    inferredToImplementInterface implementedInterface: Interface?,
+    parentCacheKey: String?
   ) -> CacheKey?
 }
 
@@ -68,9 +71,14 @@ extension CacheKeyComputingExecutionSource {
   @_spi(Execution) public func computeCacheKey(
     for object: RawObjectData,
     in schema: any SchemaMetadata.Type,
-    inferredToImplementInterface implementedInterface: Interface?
+    inferredToImplementInterface implementedInterface: Interface?,
+    parentCacheKey: String?
   ) -> CacheKey? {
     let dataWrapper = opaqueObjectDataWrapper(for: object)
-    return schema.cacheKey(for: dataWrapper, inferredToImplementInterface: implementedInterface)
+    return schema.cacheKey(
+      for: dataWrapper,
+      inferredToImplementInterface: implementedInterface,
+      parentCacheKey: parentCacheKey
+    )
   }
 }
