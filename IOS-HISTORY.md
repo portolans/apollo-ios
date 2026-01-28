@@ -14,7 +14,7 @@ The early days (v0.23.x - v0.34.x) were wild and uncharted. Like settlers buildi
 
 ---
 
-## Act I: The Long March to 1.0 (2023)
+## Act I: The Long March to 1.0
 
 After approximately *one billion* beta releases (okay, technically v1.0.4 through v1.0.7 and then v1.1.0-beta.1), Apollo iOS finally reached the promised land of **version 1.0**.
 
@@ -29,7 +29,7 @@ The team celebrated. The users celebrated. Everything was perfect.
 
 ---
 
-## Act II: The Race Condition Wars (2024-2025)
+## Act II: The Race Condition Wars (2025)
 
 If there's one thing the Apollo iOS commit history teaches us, it's that **race conditions are the final boss of mobile development**. Observe the carnage:
 
@@ -71,9 +71,9 @@ By June 2025, the team followed up with custom `SQLiteDatabase` implementations 
 
 ---
 
-## Act IV: The @defer Directive Chronicles (2024)
+## Act IV: The @defer Directive Chronicles
 
-The GraphQL community had been asking for `@defer` support for approximately *forever*. Apollo iOS finally delivered it as an experimental feature in v1.14.0.
+The GraphQL community had been asking for `@defer` support for approximately *forever*. Design work began in mid-2023, and Apollo iOS finally delivered it as an experimental feature in v1.14.0.
 
 `@defer` allows queries to receive data for specific fields asynchronously—perfect for when your backend developer designed a schema where one field takes 47 seconds to resolve while everything else is instant.
 
@@ -154,13 +154,18 @@ The roadmap remains ever-changing, like the tides of the ocean or Apple's design
 
 | Version | Release Date | Claim to Fame |
 |---------|--------------|---------------|
-| v1.0.4 | The Beginning | First stable release (allegedly) |
-| v1.12.1 | Mid-2024 | "Rebuilt the CLI binary" - when your release artifact has the wrong version |
-| v1.12.2 | Mid-2024 | "Rebuilt the CLI binary with the correct version number" - second time's the charm! |
-| v1.14.0 | Late 2024 | @defer finally arrives, angels sing |
-| v1.15.0 | 2025 | Fragment field merging can be disabled (rejoice, you five people who needed this) |
+| v1.0.4 | — | First stable release (allegedly) |
+| v1.12.1 | — | "Rebuilt the CLI binary" - when your release artifact has the wrong version |
+| v1.12.2 | — | "Rebuilt the CLI binary with the correct version number" - second time's the charm! |
+| v1.14.0 | — | @defer finally arrives, angels sing |
+| v1.15.0 | — | Fragment field merging can be disabled (rejoice, you five people who needed this) |
 | v1.16.1 | Jan 2025 | WebSocket race condition fix #47 (estimated) |
+| v1.17.0 | Jan 2025 | typePolicy directive support lands |
+| v1.18.0 | Feb 2025 | Reduce Generated Schema Types feature |
+| v1.19.0 | Mar 2025 | URLRequest timeout configuration |
+| v1.20.0 | Apr 2025 | Xcode 16.3 CLI fix |
 | v1.21.0 | Apr 2025 | SQLite.swift dependency removed, independence achieved |
+| v1.22.0 | May 2025 | Public cache access in ReadTransaction |
 | v1.23.0 | Jun 2025 | The most recent stable release, featuring non-optional mock fields |
 
 ---
