@@ -15,16 +15,6 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 
 	// MARK: Public Types
 
-	public struct WSError: Swift.Error {
-		public enum ErrorType {
-			case closeError
-		}
-
-		public let type: ErrorType
-		public let message: String
-		public let code: Int
-	}
-
 	/// The GraphQL over WebSocket protocols supported by apollo-ios.
 	public enum WSProtocol: CustomStringConvertible {
 		/// WebSocket protocol `graphql-ws`. This is implemented by the [subscriptions-transport-ws](https://github.com/apollographql/subscriptions-transport-ws)
@@ -104,10 +94,14 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 		}
 		let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
 		let task = session.webSocketTask(with: request)
-		state.withLock {
+		// Invalidate any previous session to break the URLSession -> delegate retain cycle.
+		let previousSession: URLSession? = state.withLock {
+			let old = $0.session
 			$0.session = session
 			$0.task = task
+			return old
 		}
+		previousSession?.invalidateAndCancel()
 		task.resume()
 	}
 
@@ -122,38 +116,27 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 				guard let self else { return }
 				let shouldForce: Bool = self.state.withLock { $0.task === currentTask }
 				if shouldForce {
-					self.forceDisconnect()
+					self.tearDown()
 				}
 			}
 		default:
-			forceDisconnect()
+			tearDown()
 		}
 	}
 
 	public func write(string: String) {
 		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
-		currentTask?.send(.string(string)) { [weak self] error in
-			if let error {
-				self?.handleError(error)
-			}
-		}
+		currentTask?.send(.string(string)) { _ in }
 	}
 
 	public func write(ping: Data, completion: (() -> Void)? = nil) {
 		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
-		currentTask?.sendPing { [weak self] error in
-			if let error {
-				self?.handleError(error)
-			}
+		currentTask?.sendPing { _ in
 			completion?()
 		}
 	}
 
 	// MARK: Private
-
-	private func forceDisconnect() {
-		tearDown()
-	}
 
 	private func startReceiveLoop() {
 		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
@@ -173,16 +156,12 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 				}
 				self.startReceiveLoop()
 
-			case .failure(let error):
-				self.handleError(error)
+			case .failure:
+				// URLSessionWebSocketTask delivers errors through the delegate's
+				// didCompleteWithError, which handles disconnect notification.
+				break
 			}
 		}
-	}
-
-	private func handleError(_ error: any Error) {
-		// URLSessionWebSocketTask delivers errors through both the receive loop and the
-		// delegate's didCompleteWithError. The delegate handles disconnect notification,
-		// so we don't duplicate it here.
 	}
 
 	private func tearDown() {
@@ -213,6 +192,8 @@ extension WebSocket: URLSessionWebSocketDelegate {
 		webSocketTask: URLSessionWebSocketTask,
 		didOpenWithProtocol protocol: String?
 	) {
+		let isCurrent = state.withLock { $0.session === session }
+		guard isCurrent else { return }
 		state.withLock { $0.isConnected = true }
 		startReceiveLoop()
 		callbackQueue.async { [weak self] in
@@ -227,6 +208,8 @@ extension WebSocket: URLSessionWebSocketDelegate {
 		didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
 		reason: Data?
 	) {
+		let isCurrent = state.withLock { $0.session === session }
+		guard isCurrent else { return }
 		tearDown()
 		callbackQueue.async { [weak self] in
 			guard let self else { return }
@@ -240,6 +223,8 @@ extension WebSocket: URLSessionWebSocketDelegate {
 		didCompleteWithError error: (any Error)?
 	) {
 		guard error != nil else { return }
+		let isCurrent = state.withLock { $0.session === session }
+		guard isCurrent else { return }
 		tearDown()
 		callbackQueue.async { [weak self] in
 			guard let self else { return }
