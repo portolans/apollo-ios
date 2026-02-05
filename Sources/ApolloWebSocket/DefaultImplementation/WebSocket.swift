@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - SOCKSProxyable
 
@@ -53,7 +54,7 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 	public var callbackQueue = DispatchQueue.main
 
 	public var isConnected: Bool {
-		lock.withLock { _isConnected }
+		state.withLock { $0.isConnected }
 	}
 
 	// MARK: SOCKSProxyable
@@ -62,10 +63,13 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 
 	// MARK: Private Properties
 
-	private var session: URLSession?
-	private var task: URLSessionWebSocketTask?
-	private var _isConnected = false
-	private let lock = NSLock()
+	private struct State {
+		var session: URLSession?
+		var task: URLSessionWebSocketTask?
+		var isConnected = false
+	}
+
+	private let state = OSAllocatedUnfairLock<State>(initialState: .init())
 
 	// MARK: Initialization
 
@@ -100,15 +104,15 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 		}
 		let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
 		let task = session.webSocketTask(with: request)
-		lock.withLock {
-			self.session = session
-			self.task = task
+		state.withLock {
+			$0.session = session
+			$0.task = task
 		}
 		task.resume()
 	}
 
 	public func disconnect(forceTimeout: TimeInterval?) {
-		let currentTask: URLSessionWebSocketTask? = lock.withLock { task }
+		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
 		switch forceTimeout {
 		case .none:
 			currentTask?.cancel(with: .normalClosure, reason: nil)
@@ -116,7 +120,7 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 			currentTask?.cancel(with: .normalClosure, reason: nil)
 			callbackQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
 				guard let self else { return }
-				let shouldForce: Bool = self.lock.withLock { self.task === currentTask }
+				let shouldForce: Bool = self.state.withLock { $0.task === currentTask }
 				if shouldForce {
 					self.forceDisconnect()
 				}
@@ -127,7 +131,7 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 	}
 
 	public func write(string: String) {
-		let currentTask: URLSessionWebSocketTask? = lock.withLock { task }
+		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
 		currentTask?.send(.string(string)) { [weak self] error in
 			if let error {
 				self?.handleError(error)
@@ -136,7 +140,7 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 	}
 
 	public func write(ping: Data, completion: (() -> Void)? = nil) {
-		let currentTask: URLSessionWebSocketTask? = lock.withLock { task }
+		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
 		currentTask?.sendPing { [weak self] error in
 			if let error {
 				self?.handleError(error)
@@ -152,7 +156,7 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 	}
 
 	private func startReceiveLoop() {
-		let currentTask: URLSessionWebSocketTask? = lock.withLock { task }
+		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
 		currentTask?.receive { [weak self] result in
 			guard let self else { return }
 			switch result {
@@ -182,19 +186,21 @@ public final class WebSocket: NSObject, WebSocketClient, SOCKSProxyable {
 	}
 
 	private func tearDown() {
-		let sessionToInvalidate: URLSession? = lock.withLock {
-			_isConnected = false
-			let s = session
-			session = nil
-			task = nil
+		let sessionToInvalidate: URLSession? = state.withLock {
+			$0.isConnected = false
+			let s = $0.session
+			$0.session = nil
+			$0.task = nil
 			return s
 		}
 		sessionToInvalidate?.invalidateAndCancel()
 	}
 
 	deinit {
-		task?.cancel()
-		session?.invalidateAndCancel()
+		state.withLock {
+			$0.task?.cancel()
+			$0.session?.invalidateAndCancel()
+		}
 	}
 }
 
@@ -207,7 +213,7 @@ extension WebSocket: URLSessionWebSocketDelegate {
 		webSocketTask: URLSessionWebSocketTask,
 		didOpenWithProtocol protocol: String?
 	) {
-		lock.withLock { _isConnected = true }
+		state.withLock { $0.isConnected = true }
 		startReceiveLoop()
 		callbackQueue.async { [weak self] in
 			guard let self else { return }
