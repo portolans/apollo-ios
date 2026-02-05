@@ -9,10 +9,10 @@ Pod::Spec.new do |s|
   s.requires_arc = true
   s.swift_version = '5.6'
   s.default_subspecs = 'Core'
-  s.ios.deployment_target = '12.0'
-  s.osx.deployment_target = '10.14'
-  s.tvos.deployment_target = '12.0'
-  s.watchos.deployment_target = '5.0'
+  s.ios.deployment_target = '13.0'
+  s.osx.deployment_target = '10.15'
+  s.tvos.deployment_target = '13.0'
+  s.watchos.deployment_target = '6.0'
   s.visionos.deployment_target = '1.0'
 
   cli_binary_name = 'apollo-ios-cli'
@@ -36,7 +36,7 @@ Pod::Spec.new do |s|
     }
   end
 
-  # Websocket and subscription support based on Starscream
+  # Websocket and subscription support
   s.subspec 'WebSocket' do |ss|
     ss.source_files = 'Sources/ApolloWebSocket/**/*.swift'
     ss.dependency 'Apollo/Core'

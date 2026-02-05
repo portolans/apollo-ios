@@ -412,7 +412,7 @@ public class WebSocketTransport {
   
   /// Disconnects the websocket while setting the auto-reconnect value to false,
   /// allowing purposeful disconnects that do not dump existing subscriptions.
-  /// NOTE: You will receive an error on the subscription (should be a `WebSocket.WSError` with code 1000) when the socket disconnects.
+  /// NOTE: You will receive an error on the subscription when the socket disconnects.
   /// ALSO NOTE: In case pauseWebSocketConnection is called when app is backgrounded, app might get suspended within 5 seconds. In case disconnect did not complete within that time, websocket won't resume properly. That is why forceTimeout is set to 2 seconds.
   /// ALSO NOTE: To reconnect after calling this, you will need to call `resumeWebSocketConnection`.
   public func pauseWebSocketConnection() {
