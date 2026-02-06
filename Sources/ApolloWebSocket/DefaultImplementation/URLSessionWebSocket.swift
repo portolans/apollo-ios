@@ -115,6 +115,11 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 			guard let self else { return }
 			switch result {
 			case .success(let message):
+				// Verify this task is still current before delivering message.
+				// A reconnection may have created a new task while this receive was pending.
+				let isCurrentTask = self.state.withLock { $0.task === currentTask }
+				guard isCurrentTask else { return }
+
 				self.callbackQueue.async {
 					switch message {
 					case .string(let text):
@@ -143,7 +148,10 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 			$0.task = nil
 			return s
 		}
-		sessionToInvalidate?.invalidateAndCancel()
+		// Only notify delegate if there was actually a session to tear down.
+		guard let sessionToInvalidate else { return }
+
+		sessionToInvalidate.invalidateAndCancel()
 		// Notify delegate since invalidateAndCancel() triggers URLSession delegate callbacks
 		// asynchronously, and our session check in those callbacks will fail (we nil'd the session above).
 		callbackQueue.async { [weak self] in
