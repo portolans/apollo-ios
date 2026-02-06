@@ -80,6 +80,11 @@ public class WebSocketTransport {
     }
   }
 
+  public enum WebSocketProvider {
+    case legacy
+    case urlSession
+  }
+
   public struct Configuration {
     /// The client name to use for this client. Defaults to `Self.defaultClientName`
     public fileprivate(set) var clientName: String
@@ -102,6 +107,8 @@ public class WebSocketTransport {
     /// The `OperationMessageIdCreator` used to generate a unique message identifier per request.
     /// Defaults to `ApolloSequencedOperationMessageIdCreator`.
     public let operationMessageIdCreator: any OperationMessageIdCreator
+    /// Which WebSocket implementation to use. Defaults to `.legacy`.
+    public let webSocketProvider: WebSocketProvider
 
     /// The designated initializer
     public init(
@@ -113,7 +120,8 @@ public class WebSocketTransport {
       connectOnInit: Bool = true,
       connectingPayload: JSONEncodableDictionary? = [:],
       requestBodyCreator: any RequestBodyCreator = ApolloRequestBodyCreator(),
-      operationMessageIdCreator: any OperationMessageIdCreator = ApolloSequencedOperationMessageIdCreator()
+      operationMessageIdCreator: any OperationMessageIdCreator = ApolloSequencedOperationMessageIdCreator(),
+      webSocketProvider: WebSocketProvider = .legacy
     ) {
       self.clientName = clientName
       self.clientVersion = clientVersion
@@ -124,6 +132,7 @@ public class WebSocketTransport {
       self.connectingPayload = connectingPayload
       self.requestBodyCreator = requestBodyCreator
       self.operationMessageIdCreator = operationMessageIdCreator
+      self.webSocketProvider = webSocketProvider
     }
   }
 
@@ -148,6 +157,30 @@ public class WebSocketTransport {
 
       websocket.enableSOCKSProxy = newValue
     }
+  }
+
+  /// Convenience initializer that creates the appropriate `WebSocketClient` based on the
+  /// `webSocketProvider` in the configuration.
+  ///
+  /// - Parameters:
+  ///   - url: The destination URL to connect to.
+  ///   - webSocketProtocol: Protocol to use for communication over the web socket.
+  ///   - store: [optional] The `ApolloStore` used as a local cache.
+  ///   - config: A `WebSocketTransport.Configuration` object with options for configuring the
+  ///             web socket connection. Defaults to a configuration with default values.
+  public convenience init(
+    url: URL,
+    webSocketProtocol: WebSocket.WSProtocol,
+    store: ApolloStore? = nil,
+    config: Configuration = Configuration()
+  ) {
+    let websocket: any WebSocketClient = switch config.webSocketProvider {
+    case .legacy:
+      WebSocket(url: url, protocol: webSocketProtocol)
+    case .urlSession:
+      URLSessionWebSocket(url: url, protocol: webSocketProtocol)
+    }
+    self.init(websocket: websocket, store: store, config: config)
   }
 
   /// Designated initializer
