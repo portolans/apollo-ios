@@ -98,6 +98,9 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func write(ping: Data, completion: (() -> Void)? = nil) {
+		// URLSessionWebSocketTask.sendPing does not support custom ping payloads.
+		// Apollo never sends non-empty pings – this assert guards against future misuse.
+		assert(ping.isEmpty, "URLSessionWebSocketTask does not support custom ping payloads")
 		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
 		currentTask?.sendPing { _ in
 			completion?()
@@ -160,9 +163,12 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		webSocketTask: URLSessionWebSocketTask,
 		didOpenWithProtocol protocol: String?
 	) {
-		let isCurrent = state.withLock { $0.session === session }
+		let isCurrent = state.withLock {
+			guard $0.session === session else { return false }
+			$0.isConnected = true
+			return true
+		}
 		guard isCurrent else { return }
-		state.withLock { $0.isConnected = true }
 		startReceiveLoop()
 		callbackQueue.async { [weak self] in
 			guard let self else { return }
@@ -176,9 +182,16 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
 		reason: Data?
 	) {
-		let isCurrent = state.withLock { $0.session === session }
-		guard isCurrent else { return }
-		tearDown()
+		let sessionToInvalidate: URLSession? = state.withLock {
+			guard $0.session === session else { return nil }
+			$0.isConnected = false
+			let s = $0.session
+			$0.session = nil
+			$0.task = nil
+			return s
+		}
+		guard let sessionToInvalidate else { return }
+		sessionToInvalidate.invalidateAndCancel()
 		callbackQueue.async { [weak self] in
 			guard let self else { return }
 			self.delegate?.websocketDidDisconnect(socket: self, error: nil)
@@ -191,9 +204,16 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		didCompleteWithError error: (any Error)?
 	) {
 		guard error != nil else { return }
-		let isCurrent = state.withLock { $0.session === session }
-		guard isCurrent else { return }
-		tearDown()
+		let sessionToInvalidate: URLSession? = state.withLock {
+			guard $0.session === session else { return nil }
+			$0.isConnected = false
+			let s = $0.session
+			$0.session = nil
+			$0.task = nil
+			return s
+		}
+		guard let sessionToInvalidate else { return }
+		sessionToInvalidate.invalidateAndCancel()
 		callbackQueue.async { [weak self] in
 			guard let self else { return }
 			self.delegate?.websocketDidDisconnect(socket: self, error: error)
