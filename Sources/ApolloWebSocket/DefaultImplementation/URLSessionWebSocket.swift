@@ -144,6 +144,29 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 			return s
 		}
 		sessionToInvalidate?.invalidateAndCancel()
+		// Notify delegate since invalidateAndCancel() triggers URLSession delegate callbacks
+		// asynchronously, and our session check in those callbacks will fail (we nil'd the session above).
+		callbackQueue.async { [weak self] in
+			guard let self else { return }
+			self.delegate?.websocketDidDisconnect(socket: self, error: nil)
+		}
+	}
+
+	private func cleanupSession(_ session: URLSession, error: (any Error)?) {
+		let sessionToInvalidate: URLSession? = state.withLock {
+			guard $0.session === session else { return nil }
+			$0.isConnected = false
+			let s = $0.session
+			$0.session = nil
+			$0.task = nil
+			return s
+		}
+		guard let sessionToInvalidate else { return }
+		sessionToInvalidate.invalidateAndCancel()
+		callbackQueue.async { [weak self] in
+			guard let self else { return }
+			self.delegate?.websocketDidDisconnect(socket: self, error: error)
+		}
 	}
 
 	deinit {
@@ -182,20 +205,7 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
 		reason: Data?
 	) {
-		let sessionToInvalidate: URLSession? = state.withLock {
-			guard $0.session === session else { return nil }
-			$0.isConnected = false
-			let s = $0.session
-			$0.session = nil
-			$0.task = nil
-			return s
-		}
-		guard let sessionToInvalidate else { return }
-		sessionToInvalidate.invalidateAndCancel()
-		callbackQueue.async { [weak self] in
-			guard let self else { return }
-			self.delegate?.websocketDidDisconnect(socket: self, error: nil)
-		}
+		cleanupSession(session, error: nil)
 	}
 
 	public func urlSession(
@@ -204,19 +214,6 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		didCompleteWithError error: (any Error)?
 	) {
 		guard error != nil else { return }
-		let sessionToInvalidate: URLSession? = state.withLock {
-			guard $0.session === session else { return nil }
-			$0.isConnected = false
-			let s = $0.session
-			$0.session = nil
-			$0.task = nil
-			return s
-		}
-		guard let sessionToInvalidate else { return }
-		sessionToInvalidate.invalidateAndCancel()
-		callbackQueue.async { [weak self] in
-			guard let self else { return }
-			self.delegate?.websocketDidDisconnect(socket: self, error: error)
-		}
+		cleanupSession(session, error: error)
 	}
 }
