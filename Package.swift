@@ -9,10 +9,10 @@ import PackageDescription
 let package = Package(
   name: "Apollo",
   platforms: [
-    .iOS(.v12),
-    .macOS(.v10_14),
-    .tvOS(.v12),
-    .watchOS(.v5),
+    .iOS(.v17),
+    .macOS(.v14),
+    .tvOS(.v17),
+    .watchOS(.v10),
     .visionOS(.v1),
   ],
   products: [
