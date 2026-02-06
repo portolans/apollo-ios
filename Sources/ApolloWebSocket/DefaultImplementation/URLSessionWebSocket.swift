@@ -67,6 +67,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 			let old = $0.session
 			$0.session = session
 			$0.task = task
+			$0.isConnected = false
 			return old
 		}
 		previousSession?.invalidateAndCancel()
