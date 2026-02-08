@@ -62,6 +62,10 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		}
 		let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
 		let task = session.webSocketTask(with: request)
+		// URLSessionWebSocketTask defaults to a 1MB maximum incoming message size.
+		// The legacy Starscream WebSocket had no such limit, so we set a high ceiling
+		// to avoid "Message too long" failures on large GraphQL subscription payloads.
+		task.maximumMessageSize = 10 * 1_024 * 1_024
 		// Invalidate any previous session to break the URLSession -> delegate retain cycle.
 		let previousSession: URLSession? = state.withLock {
 			let old = $0.session
