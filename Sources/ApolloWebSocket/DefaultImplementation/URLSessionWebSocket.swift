@@ -1,6 +1,40 @@
 import Foundation
 import os
 
+// MARK: - SOCKSProxyable
+
+public protocol SOCKSProxyable {
+	/// Determines whether a SOCKS proxy is enabled on the underlying request.
+	/// Mostly useful for debugging with tools like Charles Proxy.
+	var enableSOCKSProxy: Bool { get set }
+}
+
+// MARK: - WSProtocol
+
+/// The GraphQL over WebSocket protocols supported by apollo-ios.
+public enum WSProtocol: CustomStringConvertible {
+	/// WebSocket protocol `graphql-ws`. This is implemented by the [subscriptions-transport-ws](https://github.com/apollographql/subscriptions-transport-ws)
+	/// and AWS AppSync libraries.
+	case graphql_ws
+	/// WebSocket protocol `graphql-transport-ws`. This is implemented by the [graphql-ws](https://github.com/enisdenjo/graphql-ws)
+	/// library.
+	case graphql_transport_ws
+
+	public var description: String {
+		switch self {
+		case .graphql_ws: return "graphql-ws"
+		case .graphql_transport_ws: return "graphql-transport-ws"
+		}
+	}
+}
+
+// MARK: - WebSocketConstants
+
+@_spi(Testable)
+public enum WebSocketConstants {
+	public static let headerWSProtocolName = "Sec-WebSocket-Protocol"
+}
+
 // MARK: - URLSessionWebSocket
 
 public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyable {
@@ -36,9 +70,9 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	/// - Parameters:
 	///   - request: A URL request object that provides request-specific information such as the URL.
 	///   - protocol: Protocol to use for communication over the web socket.
-	public init(request: URLRequest, protocol: WebSocket.WSProtocol) {
+	public init(request: URLRequest, protocol: WSProtocol) {
 		var request = request
-		request.setValue(`protocol`.description, forHTTPHeaderField: WebSocket.Constants.headerWSProtocolName)
+		request.setValue(`protocol`.description, forHTTPHeaderField: WebSocketConstants.headerWSProtocolName)
 		self.request = request
 	}
 
@@ -47,7 +81,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	/// - Parameters:
 	///   - url: The destination URL to connect to.
 	///   - protocol: Protocol to use for communication over the web socket.
-	public convenience init(url: URL, protocol: WebSocket.WSProtocol) {
+	public convenience init(url: URL, protocol: WSProtocol) {
 		var request = URLRequest(url: url)
 		request.timeoutInterval = 5
 		self.init(request: request, protocol: `protocol`)
