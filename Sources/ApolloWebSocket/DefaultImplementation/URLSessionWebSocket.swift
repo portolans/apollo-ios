@@ -116,6 +116,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		// to avoid "Message too long" failures on large GraphQL subscription payloads.
 		task.maximumMessageSize = 10 * 1_024 * 1_024
 
+		// Invalidate any previous session to break the URLSession -> delegate retain cycle.
 		let previousSession: URLSession? = state.withLock {
 			let old = $0.session
 			$0.session = session
