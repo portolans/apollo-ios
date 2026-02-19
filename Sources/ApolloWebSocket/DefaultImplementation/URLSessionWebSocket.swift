@@ -46,7 +46,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	public var callbackQueue = DispatchQueue.main
 
 	public var isConnected: Bool {
-		state.withLock { $0.isConnected }
+		state.withLock { $0.connectionState == .connected }
 	}
 
 	// MARK: SOCKSProxyable
@@ -55,10 +55,16 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 
 	// MARK: Private Properties
 
+	private enum ConnectionState {
+		case idle
+		case connecting
+		case connected
+	}
+
 	private struct State {
 		var session: URLSession?
 		var task: URLSessionWebSocketTask?
-		var isConnected = false
+		var connectionState: ConnectionState = .idle
 	}
 
 	private let state = OSAllocatedUnfairLock<State>(initialState: .init())
@@ -90,6 +96,15 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	// MARK: WebSocketClient
 
 	public func connect() {
+		// Atomically check idle and claim .connecting. This prevents
+		// concurrent connect() calls from racing past this point.
+		let canConnect: Bool = state.withLock {
+			guard $0.connectionState == .idle else { return false }
+			$0.connectionState = .connecting
+			return true
+		}
+		guard canConnect else { return }
+
 		let configuration = URLSessionConfiguration.default
 		if enableSOCKSProxy, let proxySettings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] {
 			configuration.connectionProxyDictionary = proxySettings
@@ -100,12 +115,11 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		// The legacy Starscream WebSocket had no such limit, so we set a high ceiling
 		// to avoid "Message too long" failures on large GraphQL subscription payloads.
 		task.maximumMessageSize = 10 * 1_024 * 1_024
-		// Invalidate any previous session to break the URLSession -> delegate retain cycle.
+
 		let previousSession: URLSession? = state.withLock {
 			let old = $0.session
 			$0.session = session
 			$0.task = task
-			$0.isConnected = false
 			return old
 		}
 		previousSession?.invalidateAndCancel()
@@ -113,12 +127,16 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func disconnect(forceTimeout: TimeInterval?) {
-		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
+		let currentTask: URLSessionWebSocketTask? = state.withLock {
+			guard $0.connectionState != .idle else { return nil }
+			return $0.task
+		}
+		guard let currentTask else { return }
 		switch forceTimeout {
 		case .none:
-			currentTask?.cancel(with: .normalClosure, reason: nil)
+			currentTask.cancel(with: .normalClosure, reason: nil)
 		case .some(let timeout) where timeout > 0:
-			currentTask?.cancel(with: .normalClosure, reason: nil)
+			currentTask.cancel(with: .normalClosure, reason: nil)
 			callbackQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
 				guard let self else { return }
 				let shouldForce: Bool = self.state.withLock { $0.task === currentTask }
@@ -181,7 +199,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 
 	private func tearDown() {
 		let sessionToInvalidate: URLSession? = state.withLock {
-			$0.isConnected = false
+			$0.connectionState = .idle
 			let s = $0.session
 			$0.session = nil
 			$0.task = nil
@@ -202,7 +220,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	private func cleanupSession(_ session: URLSession, error: (any Error)?) {
 		let sessionToInvalidate: URLSession? = state.withLock {
 			guard $0.session === session else { return nil }
-			$0.isConnected = false
+			$0.connectionState = .idle
 			let s = $0.session
 			$0.session = nil
 			$0.task = nil
@@ -235,7 +253,7 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 	) {
 		let isCurrent = state.withLock {
 			guard $0.session === session else { return false }
-			$0.isConnected = true
+			$0.connectionState = .connected
 			return true
 		}
 		guard isCurrent else { return }
@@ -260,7 +278,10 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		task: URLSessionTask,
 		didCompleteWithError error: (any Error)?
 	) {
-		guard error != nil else { return }
-		cleanupSession(session, error: error)
+		guard let error else { return }
+		// Cancellation errors are triggered by our own tearDown()/connect() calls
+		// via invalidateAndCancel(). These are intentional disconnects, not failures.
+		let reportedError = (error as NSError).code == NSURLErrorCancelled ? nil : error
+		cleanupSession(session, error: reportedError)
 	}
 }
