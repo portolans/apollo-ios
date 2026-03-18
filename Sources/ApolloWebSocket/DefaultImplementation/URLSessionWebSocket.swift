@@ -116,12 +116,19 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		// to avoid "Message too long" failures on large GraphQL subscription payloads.
 		task.maximumMessageSize = 10 * 1_024 * 1_024
 
-		// Invalidate any previous session to break the URLSession -> delegate retain cycle.
-		let previousSession: URLSession? = state.withLock {
+		// Store the new session/task, but only if we're still .connecting.
+		// A concurrent tearDown() or disconnect() may have reset us to .idle
+		// between the first lock (claiming .connecting) and now.
+		let (proceed, previousSession): (Bool, URLSession?) = state.withLock {
+			guard $0.connectionState == .connecting else { return (false, nil) }
 			let old = $0.session
 			$0.session = session
 			$0.task = task
-			return old
+			return (true, old)
+		}
+		guard proceed else {
+			session.invalidateAndCancel()
+			return
 		}
 		previousSession?.invalidateAndCancel()
 		task.resume()
@@ -132,7 +139,12 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 			guard $0.connectionState != .idle else { return nil }
 			return $0.task
 		}
-		guard let currentTask else { return }
+		guard let currentTask else {
+			// State is .connecting but task isn't assigned yet — force tear down
+			// so the connection doesn't proceed after disconnect was requested.
+			tearDown()
+			return
+		}
 		switch forceTimeout {
 		case .none:
 			currentTask.cancel(with: .normalClosure, reason: nil)
@@ -200,6 +212,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 
 	private func tearDown() {
 		let sessionToInvalidate: URLSession? = state.withLock {
+			guard $0.connectionState != .idle else { return nil }
 			$0.connectionState = .idle
 			let s = $0.session
 			$0.session = nil
