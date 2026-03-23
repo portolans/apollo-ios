@@ -135,30 +135,46 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func disconnect(forceTimeout: TimeInterval?) {
-		let currentTask: URLSessionWebSocketTask? = state.withLock {
-			guard $0.connectionState != .idle else { return nil }
-			return $0.task
+		enum DisconnectAction {
+			case none
+			case tearDown
+			case cancelTask(URLSessionWebSocketTask)
 		}
-		guard let currentTask else {
-			// State is .connecting but task isn't assigned yet — force tear down
-			// so the connection doesn't proceed after disconnect was requested.
-			tearDown()
-			return
-		}
-		switch forceTimeout {
-		case .none:
-			currentTask.cancel(with: .normalClosure, reason: nil)
-		case .some(let timeout) where timeout > 0:
-			currentTask.cancel(with: .normalClosure, reason: nil)
-			callbackQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-				guard let self else { return }
-				let shouldForce: Bool = self.state.withLock { $0.task === currentTask }
-				if shouldForce {
-					self.tearDown()
+		let action: DisconnectAction = state.withLock {
+			switch $0.connectionState {
+			case .idle:
+				return .none
+			case .connecting, .connected:
+				if let task = $0.task {
+					return .cancelTask(task)
+				} else {
+					// State is .connecting but task isn't assigned yet — force tear down
+					// so the connection doesn't proceed after disconnect was requested.
+					return .tearDown
 				}
 			}
-		default:
+		}
+		switch action {
+		case .none:
+			return
+		case .tearDown:
 			tearDown()
+		case .cancelTask(let currentTask):
+			switch forceTimeout {
+			case .none:
+				currentTask.cancel(with: .normalClosure, reason: nil)
+			case .some(let timeout) where timeout > 0:
+				currentTask.cancel(with: .normalClosure, reason: nil)
+				callbackQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+					guard let self else { return }
+					let shouldForce: Bool = self.state.withLock { $0.task === currentTask }
+					if shouldForce {
+						self.tearDown()
+					}
+				}
+			default:
+				tearDown()
+			}
 		}
 	}
 
