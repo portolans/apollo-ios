@@ -15,8 +15,9 @@ import Combine
 public final class GraphQLQueryWatcher<Query: GraphQLQuery>: Cancellable, ApolloStoreSubscriber {
   weak var client: (any ApolloClientProtocol)?
   public let query: Query
-  public var watchFailedPassthroughPublisher: some Publisher<any Error, Never> {
-      _watchFailedPassthroughPublisher
+  /// Fires whenever an update to the store makes the watched query fail.
+  public var watchUpdateFailedPassthroughPublisher: some Publisher<any Error, Never> {
+      _watchUpdateFailedPassthroughPublisher
   }
 
   /// Determines if the watcher should perform a network fetch when it's watched objects have
@@ -28,7 +29,7 @@ public final class GraphQLQueryWatcher<Query: GraphQLQuery>: Cancellable, Apollo
   let resultHandler: GraphQLResultHandler<Query.Data>
 
   private let callbackQueue: DispatchQueue
-  private let _watchFailedPassthroughPublisher = PassthroughSubject<any Error, Never>()
+  private let _watchUpdateFailedPassthroughPublisher = PassthroughSubject<any Error, Never>()
 
   private let contextIdentifier = UUID()
   private let context: (any RequestContext)?
@@ -142,7 +143,7 @@ public final class GraphQLQueryWatcher<Query: GraphQLQuery>: Cancellable, Apollo
           }
         case .failure(let error):
           if self.refetchOnFailedUpdates && self.fetching.cachePolicy != .returnCacheDataDontFetch {
-            _watchFailedPassthroughPublisher.send(error)
+            _watchUpdateFailedPassthroughPublisher.send(error)
             // If the cache fetch is not successful, for instance if the data is missing, refresh from the server.
             self.fetch(cachePolicy: .fetchIgnoringCacheData)
           }
