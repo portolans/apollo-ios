@@ -2,6 +2,7 @@ import Foundation
 #if !COCOAPODS
 import ApolloAPI
 #endif
+import Combine
 
 /// A `GraphQLQueryWatcher` is responsible for watching the store, and calling the result handler with a new result
 /// whenever any of the data the previous result depends on changes. If your query shares response objects with other
@@ -14,6 +15,9 @@ import ApolloAPI
 public final class GraphQLQueryWatcher<Query: GraphQLQuery>: Cancellable, ApolloStoreSubscriber {
   weak var client: (any ApolloClientProtocol)?
   public let query: Query
+  public var watchFailedPassthroughPublisher: some Publisher<any Error, Never> {
+      _watchFailedPassthroughPublisher
+  }
 
   /// Determines if the watcher should perform a network fetch when it's watched objects have
   /// changed, but reloading them from the cache fails. Defaults to `true`.
@@ -24,6 +28,7 @@ public final class GraphQLQueryWatcher<Query: GraphQLQuery>: Cancellable, Apollo
   let resultHandler: GraphQLResultHandler<Query.Data>
 
   private let callbackQueue: DispatchQueue
+  private let _watchFailedPassthroughPublisher = PassthroughSubject<any Error, Never>()
 
   private let contextIdentifier = UUID()
   private let context: (any RequestContext)?
@@ -135,8 +140,9 @@ public final class GraphQLQueryWatcher<Query: GraphQLQuery>: Cancellable, Apollo
             }
             self.resultHandler(result)
           }
-        case .failure:
+        case .failure(let error):
           if self.refetchOnFailedUpdates && self.fetching.cachePolicy != .returnCacheDataDontFetch {
+            _watchFailedPassthroughPublisher.send(error)
             // If the cache fetch is not successful, for instance if the data is missing, refresh from the server.
             self.fetch(cachePolicy: .fetchIgnoringCacheData)
           }
