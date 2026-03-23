@@ -135,8 +135,15 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func disconnect(forceTimeout: TimeInterval?) {
-		// Grab the task before tearing down so we can send a graceful close frame.
-		let task: URLSessionWebSocketTask? = state.withLock { $0.task }
+		// Atomically check non-idle and grab the task so a concurrent connect()
+		// can't slip into .connecting between the check and tearDown().
+		var shouldDisconnect = false
+		let task: URLSessionWebSocketTask? = state.withLock {
+			guard $0.connectionState != .idle else { return nil }
+			shouldDisconnect = true
+			return $0.task
+		}
+		guard shouldDisconnect else { return }
 		// Send a close frame so the server tears down its side promptly,
 		// avoiding duplicate subscription deliveries on a quick reconnect.
 		task?.cancel(with: .normalClosure, reason: nil)
