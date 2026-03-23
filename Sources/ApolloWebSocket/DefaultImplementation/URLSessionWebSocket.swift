@@ -286,7 +286,7 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		guard let error else { return }
 		// Cancellation errors are triggered by our own tearDown()/connect() calls
 		// via invalidateAndCancel(). These are intentional disconnects, not failures.
-		let reportedError = (error as NSError).code == NSURLErrorCancelled ? nil : error
+		let reportedError: (any Error)? = (error as? URLError)?.code == .cancelled ? nil : error
 		cleanupSession(session, error: reportedError)
 	}
 }
