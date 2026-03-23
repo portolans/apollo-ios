@@ -135,47 +135,10 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func disconnect(forceTimeout: TimeInterval?) {
-		enum DisconnectAction {
-			case none
-			case tearDown
-			case cancelTask(URLSessionWebSocketTask)
-		}
-		let action: DisconnectAction = state.withLock {
-			switch $0.connectionState {
-			case .idle:
-				return .none
-			case .connecting, .connected:
-				if let task = $0.task {
-					return .cancelTask(task)
-				} else {
-					// State is .connecting but task isn't assigned yet — force tear down
-					// so the connection doesn't proceed after disconnect was requested.
-					return .tearDown
-				}
-			}
-		}
-		switch action {
-		case .none:
-			return
-		case .tearDown:
-			tearDown()
-		case .cancelTask(let currentTask):
-			switch forceTimeout {
-			case .none:
-				currentTask.cancel(with: .normalClosure, reason: nil)
-			case .some(let timeout) where timeout > 0:
-				currentTask.cancel(with: .normalClosure, reason: nil)
-				callbackQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-					guard let self else { return }
-					let shouldForce: Bool = self.state.withLock { $0.task === currentTask }
-					if shouldForce {
-						self.tearDown()
-					}
-				}
-			default:
-				tearDown()
-			}
-		}
+		// Eagerly tear down so a subsequent connect() sees .idle immediately.
+		// The old session/task are nil'd out, so delegate callbacks from the
+		// cancelled task will no-op via session identity checks in cleanupSession.
+		tearDown()
 	}
 
 	public func write(string: String) {
