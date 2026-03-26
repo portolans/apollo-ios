@@ -65,6 +65,8 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		var session: URLSession?
 		var task: URLSessionWebSocketTask?
 		var connectionState: ConnectionState = .idle
+		/// Monotonically increasing counter to distinguish connect() generations.
+		var connectGeneration: UInt64 = 0
 	}
 
 	private let state = OSAllocatedUnfairLock<State>(initialState: .init())
@@ -96,14 +98,15 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	// MARK: WebSocketClient
 
 	public func connect() {
-		// Atomically check idle and claim .connecting. This prevents
-		// concurrent connect() calls from racing past this point.
-		let canConnect: Bool = state.withLock {
-			guard $0.connectionState == .idle else { return false }
+		// Atomically check idle, claim .connecting, and capture the generation
+		// so the second lock can verify no disconnect()/connect() cycle intervened.
+		let generation: UInt64? = state.withLock {
+			guard $0.connectionState == .idle else { return nil }
 			$0.connectionState = .connecting
-			return true
+			$0.connectGeneration &+= 1
+			return $0.connectGeneration
 		}
-		guard canConnect else { return }
+		guard let generation else { return }
 
 		let configuration = URLSessionConfiguration.default
 		if enableSOCKSProxy, let proxySettings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] {
@@ -116,11 +119,11 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		// to avoid "Message too long" failures on large GraphQL subscription payloads.
 		task.maximumMessageSize = 10 * 1_024 * 1_024
 
-		// Store the new session/task, but only if we're still .connecting.
-		// A concurrent disconnect() may have reset us to .idle
-		// between the first lock (claiming .connecting) and now.
+		// Store the new session/task, but only if this is still our generation.
+		// A concurrent disconnect() → connect() cycle would have bumped the
+		// generation, so we abort rather than overwriting the newer attempt.
 		let (proceed, previousSession): (Bool, URLSession?) = state.withLock {
-			guard $0.connectionState == .connecting else { return (false, nil) }
+			guard $0.connectGeneration == generation else { return (false, nil) }
 			let old = $0.session
 			$0.session = session
 			$0.task = task
