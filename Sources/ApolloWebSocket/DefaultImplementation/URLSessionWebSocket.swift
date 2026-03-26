@@ -117,7 +117,7 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		task.maximumMessageSize = 10 * 1_024 * 1_024
 
 		// Store the new session/task, but only if we're still .connecting.
-		// A concurrent tearDown() or disconnect() may have reset us to .idle
+		// A concurrent disconnect() may have reset us to .idle
 		// between the first lock (claiming .connecting) and now.
 		let (proceed, previousSession): (Bool, URLSession?) = state.withLock {
 			guard $0.connectionState == .connecting else { return (false, nil) }
@@ -135,22 +135,42 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func disconnect(forceTimeout: TimeInterval?) {
-		// Atomically check non-idle and grab the task so a concurrent connect()
-		// can't slip into .connecting between the check and tearDown().
-		var shouldDisconnect = false
-		let task: URLSessionWebSocketTask? = state.withLock {
-			guard $0.connectionState != .idle else { return nil }
-			shouldDisconnect = true
-			return $0.task
+		// Atomically check non-idle, grab the task/session, and transition to
+		// .idle so a subsequent connect() can proceed immediately. The old
+		// session is kept alive (locally) for the close handshake.
+		let (task, oldSession): (URLSessionWebSocketTask?, URLSession?) = state.withLock {
+			guard $0.connectionState != .idle else { return (nil, nil) }
+			let t = $0.task
+			let s = $0.session
+			$0.connectionState = .idle
+			$0.session = nil
+			$0.task = nil
+			return (t, s)
 		}
-		guard shouldDisconnect else { return }
-		// Send a close frame so the server tears down its side promptly,
-		// avoiding duplicate subscription deliveries on a quick reconnect.
-		task?.cancel(with: .normalClosure, reason: nil)
-		// Eagerly tear down so a subsequent connect() sees .idle immediately.
-		// The old session/task are nil'd out, so delegate callbacks from the
-		// cancelled task will no-op via session identity checks in cleanupSession.
-		tearDown()
+		guard let oldSession else { return }
+
+		callbackQueue.async { [weak self] in
+			guard let self else { return }
+			self.delegate?.websocketDidDisconnect(socket: self, error: nil)
+		}
+
+		switch forceTimeout {
+		case .none:
+			// Graceful close: send close frame and let the session finish
+			// outstanding work (the close handshake) before invalidating.
+			task?.cancel(with: .normalClosure, reason: nil)
+			oldSession.finishTasksAndInvalidate()
+		case .some(let timeout) where timeout > 0:
+			// Send close frame, then force-kill after the timeout to ensure
+			// teardown completes before the OS suspends the app on background.
+			task?.cancel(with: .normalClosure, reason: nil)
+			callbackQueue.asyncAfter(deadline: .now() + timeout) {
+				oldSession.invalidateAndCancel()
+			}
+		default:
+			// forceTimeout == 0: skip the close frame for fastest possible teardown.
+			oldSession.invalidateAndCancel()
+		}
 	}
 
 	public func write(string: String) {
@@ -198,27 +218,6 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 				// didCompleteWithError, which handles disconnect notification.
 				break
 			}
-		}
-	}
-
-	private func tearDown() {
-		let sessionToInvalidate: URLSession? = state.withLock {
-			guard $0.connectionState != .idle else { return nil }
-			$0.connectionState = .idle
-			let s = $0.session
-			$0.session = nil
-			$0.task = nil
-			return s
-		}
-		// Only notify delegate if there was actually a session to tear down.
-		guard let sessionToInvalidate else { return }
-
-		sessionToInvalidate.invalidateAndCancel()
-		// Notify delegate since invalidateAndCancel() triggers URLSession delegate callbacks
-		// asynchronously, and our session check in those callbacks will fail (we nil'd the session above).
-		callbackQueue.async { [weak self] in
-			guard let self else { return }
-			self.delegate?.websocketDidDisconnect(socket: self, error: nil)
 		}
 	}
 
@@ -284,7 +283,7 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		didCompleteWithError error: (any Error)?
 	) {
 		guard let error else { return }
-		// Cancellation errors are triggered by our own tearDown()/connect() calls
+		// Cancellation errors are triggered by our own disconnect()/connect() calls
 		// via invalidateAndCancel(). These are intentional disconnects, not failures.
 		let reportedError: (any Error)? = (error as? URLError)?.code == .cancelled ? nil : error
 		cleanupSession(session, error: reportedError)
