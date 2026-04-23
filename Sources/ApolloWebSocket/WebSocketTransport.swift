@@ -348,7 +348,13 @@ public class WebSocketTransport {
   }
 
   deinit {
-    websocket.disconnect(forceTimeout: nil)
+    // APP-3705: Use forceTimeout: 0 to take the invalidateAndCancel() path instead of the
+    // finishTasksAndInvalidate() path. During dealloc we don't care about a graceful close
+    // handshake — we want URLSession's internal dispatch channel torn down immediately so
+    // its cleanup callbacks can't race with this object being freed. The nil path lets the
+    // session stay alive waiting on the close handshake, during which time pending channel
+    // callbacks can release an object that's already been freed, crashing in objc_release.
+    websocket.disconnect(forceTimeout: 0)
     self.websocket.delegate = nil
   }
 
