@@ -187,6 +187,15 @@ public extension SelectionSet {
       return nestedList.map { self.convertElements(of: $0, to: selectionSetType) as FieldValue }
     }
 
+    // Nullable-inner object list (`[Object?]`): preserve null slots so position-sensitive
+    // equality remains correct. Filtering would make `[a, null, b]` compare equal to `[a, b]`.
+    if let nullableList = list as? [DataDict?] {
+      return nullableList.map { dataDict -> FieldValue in
+        guard let dataDict else { return DataDict._NullValue }
+        return selectionSetType.init(_dataDict: dataDict)
+      }
+    }
+
     preconditionFailure("Expected list data to contain objects.")
   }
 
