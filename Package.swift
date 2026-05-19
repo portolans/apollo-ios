@@ -73,12 +73,6 @@ let package = Package(
       ],
       swiftSettings: [.enableUpcomingFeature("ExistentialAny")]
     ),
-    .testTarget(
-      name: "ApolloAPIEquatableTests",
-      dependencies: ["ApolloAPI"],
-      path: "Tests/ApolloAPIEquatableTests",
-      swiftSettings: [.enableUpcomingFeature("ExistentialAny")]
-    ),
     .plugin(
       name: "Install CLI",
       capability: .command(
