@@ -188,10 +188,16 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 			// websocketDidDisconnect never fires and Apollo never reconnects. Route
 			// genuine failures through the same teardown path as didCompleteWithError.
 			//
-			// Cancellation is our own disconnect()/connect() teardown via
-			// invalidateAndCancel(), not a failure — ignore it so we don't
-			// self-trigger a spurious reconnect. cleanupSession no-ops if the
-			// session has since been replaced, guarding against double teardown.
+			// The real protection against self-triggering a spurious reconnect is
+			// cleanupSession's session-identity guard ($0.session === session):
+			// every self-inflicted teardown (disconnect(), connect()'s abort)
+			// clears or replaces state.session before cancelling, so a leaked
+			// cancellation error from our own invalidateAndCancel() lands on a
+			// stale session and no-ops. The .cancelled check below is only a cheap
+			// fast-path — it does not catch every case, since URLSession often
+			// delivers task cancellations as NSPOSIXErrorDomain ECANCELED rather
+			// than URLError.cancelled — kept consistent with the identical filter
+			// in didCompleteWithError.
 			guard (error as? URLError)?.code != .cancelled else { return }
 			self.cleanupSession(currentSession, error: error)
 		}
