@@ -177,8 +177,24 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 	}
 
 	public func write(string: String) {
-		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
-		currentTask?.send(.string(string)) { _ in }
+		let (currentSession, currentTask): (URLSession?, URLSessionWebSocketTask?) = state.withLock {
+			($0.session, $0.task)
+		}
+		currentTask?.send(.string(string)) { [weak self] error in
+			guard let self, let error, let currentSession else { return }
+			// A failed send is one of the only signals that a half-open socket
+			// (peer/network gone but the OS never delivered a close or error) is
+			// actually dead. Without surfacing it, the read loop hangs forever, so
+			// websocketDidDisconnect never fires and Apollo never reconnects. Route
+			// genuine failures through the same teardown path as didCompleteWithError.
+			//
+			// Cancellation is our own disconnect()/connect() teardown via
+			// invalidateAndCancel(), not a failure — ignore it so we don't
+			// self-trigger a spurious reconnect. cleanupSession no-ops if the
+			// session has since been replaced, guarding against double teardown.
+			guard (error as? URLError)?.code != .cancelled else { return }
+			self.cleanupSession(currentSession, error: error)
+		}
 	}
 
 	public func write(ping: Data, completion: (() -> Void)? = nil) {
