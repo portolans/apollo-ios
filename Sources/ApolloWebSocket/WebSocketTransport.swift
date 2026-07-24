@@ -639,7 +639,9 @@ extension WebSocketTransport: WebSocketClientDelegate {
     // The exponent is clamped so that a long-running failure can't grow the multiplier to
     // infinity, which would make the delay `NaN` for a base interval of zero.
     let exponentialDelay = config.reconnectionInterval * pow(2, Double(min(attemptCount, 32)))
-    let cappedDelay = min(exponentialDelay, config.maxReconnectionInterval)
+    // Floored at zero so a negative configured interval or cap can't produce a negative delay,
+    // which would make the jitter range below reversed and trap in `Double.random(in:)`.
+    let cappedDelay = max(0, min(exponentialDelay, config.maxReconnectionInterval))
 
     guard config.reconnectionJitter > 0 else {
       return cappedDelay
@@ -662,6 +664,12 @@ extension WebSocketTransport: WebSocketClientDelegate {
 
     DispatchQueue.main.asyncAfter(deadline: .now() + reconnectionDelay(afterAttemptCount: attemptCount)) { [weak self] in
       guard let self = self else { return }
+      // `reconnect` is re-read here, not just when this attempt was scheduled, because the backoff
+      // delay can now be as long as `maxReconnectionInterval`. A consumer that calls
+      // `pauseWebSocketConnection()` or `closeConnection()` while an attempt sits in that delay
+      // expects the socket to stay down, so reconnecting anyway would defeat a deliberate
+      // disconnect — and could dial the server with credentials that have since been invalidated.
+      guard self.reconnect else { return }
       self.$socketConnectionState.mutate { socketConnectionState in
         switch socketConnectionState {
         case .disconnected, .connected:
