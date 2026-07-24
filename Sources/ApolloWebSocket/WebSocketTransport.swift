@@ -47,6 +47,10 @@ public class WebSocketTransport {
   /// Indicates if the websocket connection has been acknowledged by the server.
   private var acked = false
 
+  /// The number of reconnection attempts made since the last acknowledged connection, used to
+  /// compute the exponential backoff delay between attempts.
+  @Atomic private var consecutiveReconnectionAttempts: Int = 0
+
   private var queue: [Int: String] = [:]
 
   @Atomic
@@ -88,7 +92,26 @@ public class WebSocketTransport {
     /// Whether to auto reconnect when websocket looses connection. Defaults to true.
     @Atomic public var reconnect: Bool
     /// How long to wait before attempting to reconnect. Defaults to half a second.
+    ///
+    /// This is the *base* delay of an exponential backoff: the delay before the reconnection
+    /// attempt following `N` consecutive unacknowledged connections is
+    /// `reconnectionInterval * pow(2, N)`, capped at `maxReconnectionInterval` and then reduced by
+    /// up to `reconnectionJitter`.
     public let reconnectionInterval: TimeInterval
+    /// The maximum delay between reconnection attempts, which caps the exponential backoff of
+    /// `reconnectionInterval`. Defaults to thirty seconds. This is a hard maximum: jitter only ever
+    /// shortens a delay, so no attempt waits longer than this.
+    public let maxReconnectionInterval: TimeInterval
+    /// The fraction of the backoff delay by which that delay is randomly *shortened*, to keep many
+    /// clients that disconnect at the same time from reconnecting in lockstep. Defaults to `0.3`,
+    /// meaning the delay actually waited is picked uniformly from between 70% and 100% of the
+    /// computed delay. Values above `1` are treated as `1`.
+    ///
+    /// Jitter subtracts rather than straddling the computed delay so that `maxReconnectionInterval`
+    /// remains a true bound.
+    ///
+    /// Set to `0` to wait exactly the computed backoff delay.
+    public let reconnectionJitter: Double
     /// Allow sending duplicate messages. Important when reconnected. Defaults to true.
     public let allowSendingDuplicates: Bool
     ///  Whether the websocket connects immediately on creation.
@@ -108,6 +131,8 @@ public class WebSocketTransport {
       clientVersion: String = WebSocketTransport.defaultClientVersion,
       reconnect: Bool = true,
       reconnectionInterval: TimeInterval = 0.5,
+      maxReconnectionInterval: TimeInterval = 30,
+      reconnectionJitter: Double = 0.3,
       allowSendingDuplicates: Bool = true,
       connectOnInit: Bool = true,
       connectingPayload: JSONEncodableDictionary? = [:],
@@ -118,6 +143,8 @@ public class WebSocketTransport {
       self.clientVersion = clientVersion
       self._reconnect = Atomic(wrappedValue: reconnect)
       self.reconnectionInterval = reconnectionInterval
+      self.maxReconnectionInterval = maxReconnectionInterval
+      self.reconnectionJitter = reconnectionJitter
       self.allowSendingDuplicates = allowSendingDuplicates
       self.connectOnInit = connectOnInit
       self.connectingPayload = connectingPayload
@@ -256,6 +283,13 @@ public class WebSocketTransport {
 
       case .connectionAck:
         acked = true
+        // The reconnection backoff resets here, and not when the socket connects, because a
+        // `connectionAck` is the only proof the connection works end to end: we wrote a
+        // `connectionInit` and the server replied to it. A socket that connects and then fails on
+        // its first write reports a connection every time it is retried, so resetting on connect
+        // would clear the counter on every iteration of exactly the failure loop this backoff
+        // exists to slow down.
+        $consecutiveReconnectionAttempts.mutate { $0 = 0 }
         writeQueue()
 
       case .connectionKeepAlive,
@@ -442,6 +476,10 @@ public class WebSocketTransport {
   /// - Parameter autoReconnect: `true` if you want the websocket to automatically reconnect if the connection drops. Defaults to true.
   public func resumeWebSocketConnection(autoReconnect: Bool = true) {
     self.reconnect = autoReconnect
+    // A resume is a deliberate request for a connection right now, usually because something
+    // changed outside the socket's knowledge (the app foregrounded, the network came back), so it
+    // starts a fresh backoff rather than inheriting the delay accumulated before the pause.
+    self.$consecutiveReconnectionAttempts.mutate { $0 = 0 }
     self.websocket.connect()
   }
 }
@@ -597,13 +635,61 @@ extension WebSocketTransport: WebSocketClientDelegate {
     self.attemptReconnectionIfDesired()
   }
 
+  /// The delay to wait before the reconnection attempt that follows `attemptCount` earlier
+  /// consecutive attempts, applying the exponential backoff and jitter described by
+  /// `Configuration.reconnectionInterval`.
+  ///
+  /// non-private for testing - you should not use this directly
+  func reconnectionDelay(afterAttemptCount attemptCount: Int) -> TimeInterval {
+    // The exponent is clamped so that a long-running failure can't grow the multiplier to
+    // infinity, which would make the delay `NaN` for a base interval of zero.
+    let exponentialDelay = config.reconnectionInterval * pow(2, Double(min(attemptCount, 32)))
+    // Floored at zero so a negative configured interval or cap can't produce a negative delay,
+    // which would make the jitter range below reversed and trap in `Double.random(in:)`.
+    let cappedDelay = max(0, min(exponentialDelay, config.maxReconnectionInterval))
+
+    guard config.reconnectionJitter > 0 else {
+      return cappedDelay
+    }
+
+    // Jitter shortens the delay rather than straddling it, so `maxReconnectionInterval` stays a real
+    // maximum for a consumer that lowers it to bound downtime. Straddling and then clamping back to
+    // the cap would instead collapse every over-cap draw onto the cap itself, and a spike of clients
+    // all waiting exactly the cap is the correlation jitter exists to break up. The fraction is
+    // clamped so a value above 1 can't push the delay below zero.
+    let jitter = cappedDelay * min(config.reconnectionJitter, 1)
+    return cappedDelay - Double.random(in: 0...jitter)
+  }
+
   private func attemptReconnectionIfDesired() {
     guard self.reconnect else {
       return
     }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + config.reconnectionInterval) { [weak self] in
+    let attemptCount = self.$consecutiveReconnectionAttempts.mutate { attempts in
+      let attemptCount = attempts
+      attempts += 1
+      return attemptCount
+    }
+    // The counter value this attempt owns once scheduled, used below to skip a superseded attempt.
+    let scheduledAttemptCount = attemptCount + 1
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + reconnectionDelay(afterAttemptCount: attemptCount)) { [weak self] in
       guard let self = self else { return }
+      // `reconnect` is re-read here, not just when this attempt was scheduled, because the backoff
+      // delay can now be as long as `maxReconnectionInterval`. A consumer that calls
+      // `pauseWebSocketConnection()` or `closeConnection()` while an attempt sits in that delay
+      // expects the socket to stay down, so reconnecting anyway would defeat a deliberate
+      // disconnect — and could dial the server with credentials that have since been invalidated.
+      guard self.reconnect else { return }
+      // Skip an attempt that something has since superseded: the counter is reset by a
+      // `connectionAck` and by `resumeWebSocketConnection()`, and advanced by a newer scheduled
+      // attempt, so a value other than the one this attempt owns means connecting now would either
+      // duplicate a connection that already exists or cut short a newer attempt's delay. Note this
+      // narrows the window rather than closing it — a reset followed by exactly one new attempt
+      // returns the counter to the same value — but an attempt that slips through is harmless:
+      // `connect()` only proceeds from an idle socket.
+      guard self.consecutiveReconnectionAttempts == scheduledAttemptCount else { return }
       self.$socketConnectionState.mutate { socketConnectionState in
         switch socketConnectionState {
         case .disconnected, .connected:
