@@ -671,6 +671,8 @@ extension WebSocketTransport: WebSocketClientDelegate {
       attempts += 1
       return attemptCount
     }
+    // The counter value this attempt owns once scheduled, used below to skip a superseded attempt.
+    let scheduledAttemptCount = attemptCount + 1
 
     DispatchQueue.main.asyncAfter(deadline: .now() + reconnectionDelay(afterAttemptCount: attemptCount)) { [weak self] in
       guard let self = self else { return }
@@ -680,6 +682,14 @@ extension WebSocketTransport: WebSocketClientDelegate {
       // expects the socket to stay down, so reconnecting anyway would defeat a deliberate
       // disconnect — and could dial the server with credentials that have since been invalidated.
       guard self.reconnect else { return }
+      // Skip an attempt that something has since superseded: the counter is reset by a
+      // `connectionAck` and by `resumeWebSocketConnection()`, and advanced by a newer scheduled
+      // attempt, so a value other than the one this attempt owns means connecting now would either
+      // duplicate a connection that already exists or cut short a newer attempt's delay. Note this
+      // narrows the window rather than closing it — a reset followed by exactly one new attempt
+      // returns the counter to the same value — but an attempt that slips through is harmless:
+      // `connect()` only proceeds from an idle socket.
+      guard self.consecutiveReconnectionAttempts == scheduledAttemptCount else { return }
       self.$socketConnectionState.mutate { socketConnectionState in
         switch socketConnectionState {
         case .disconnected, .connected:
