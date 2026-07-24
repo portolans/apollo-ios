@@ -95,15 +95,20 @@ public class WebSocketTransport {
     ///
     /// This is the *base* delay of an exponential backoff: the delay before the reconnection
     /// attempt following `N` consecutive unacknowledged connections is
-    /// `reconnectionInterval * pow(2, N)`, capped at `maxReconnectionInterval` and then randomized
-    /// by `reconnectionJitter`.
+    /// `reconnectionInterval * pow(2, N)`, capped at `maxReconnectionInterval` and then reduced by
+    /// up to `reconnectionJitter`.
     public let reconnectionInterval: TimeInterval
     /// The maximum delay between reconnection attempts, which caps the exponential backoff of
-    /// `reconnectionInterval`. Defaults to thirty seconds.
+    /// `reconnectionInterval`. Defaults to thirty seconds. This is a hard maximum: jitter only ever
+    /// shortens a delay, so no attempt waits longer than this.
     public let maxReconnectionInterval: TimeInterval
-    /// The fraction of the backoff delay by which that delay is randomized, to keep many clients
-    /// that disconnect at the same time from reconnecting in lockstep. Defaults to `0.3`, meaning
-    /// the delay actually waited is picked uniformly from ±30% of the computed delay.
+    /// The fraction of the backoff delay by which that delay is randomly *shortened*, to keep many
+    /// clients that disconnect at the same time from reconnecting in lockstep. Defaults to `0.3`,
+    /// meaning the delay actually waited is picked uniformly from between 70% and 100% of the
+    /// computed delay. Values above `1` are treated as `1`.
+    ///
+    /// Jitter subtracts rather than straddling the computed delay so that `maxReconnectionInterval`
+    /// remains a true bound.
     ///
     /// Set to `0` to wait exactly the computed backoff delay.
     public let reconnectionJitter: Double
@@ -647,8 +652,13 @@ extension WebSocketTransport: WebSocketClientDelegate {
       return cappedDelay
     }
 
-    let jitter = cappedDelay * config.reconnectionJitter
-    return max(0, cappedDelay + Double.random(in: -jitter...jitter))
+    // Jitter shortens the delay rather than straddling it, so `maxReconnectionInterval` stays a real
+    // maximum for a consumer that lowers it to bound downtime. Straddling and then clamping back to
+    // the cap would instead collapse every over-cap draw onto the cap itself, and a spike of clients
+    // all waiting exactly the cap is the correlation jitter exists to break up. The fraction is
+    // clamped so a value above 1 can't push the delay below zero.
+    let jitter = cappedDelay * min(config.reconnectionJitter, 1)
+    return cappedDelay - Double.random(in: 0...jitter)
   }
 
   private func attemptReconnectionIfDesired() {
