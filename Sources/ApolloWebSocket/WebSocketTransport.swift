@@ -47,6 +47,10 @@ public class WebSocketTransport {
   /// Indicates if the websocket connection has been acknowledged by the server.
   private var acked = false
 
+  /// The number of reconnection attempts made since the last acknowledged connection, used to
+  /// compute the exponential backoff delay between attempts.
+  @Atomic private var consecutiveReconnectionAttempts: Int = 0
+
   private var queue: [Int: String] = [:]
 
   @Atomic
@@ -88,7 +92,21 @@ public class WebSocketTransport {
     /// Whether to auto reconnect when websocket looses connection. Defaults to true.
     @Atomic public var reconnect: Bool
     /// How long to wait before attempting to reconnect. Defaults to half a second.
+    ///
+    /// This is the *base* delay of an exponential backoff: the delay before the reconnection
+    /// attempt following `N` consecutive unacknowledged connections is
+    /// `reconnectionInterval * pow(2, N)`, capped at `maxReconnectionInterval` and then randomized
+    /// by `reconnectionJitter`.
     public let reconnectionInterval: TimeInterval
+    /// The maximum delay between reconnection attempts, which caps the exponential backoff of
+    /// `reconnectionInterval`. Defaults to thirty seconds.
+    public let maxReconnectionInterval: TimeInterval
+    /// The fraction of the backoff delay by which that delay is randomized, to keep many clients
+    /// that disconnect at the same time from reconnecting in lockstep. Defaults to `0.3`, meaning
+    /// the delay actually waited is picked uniformly from ±30% of the computed delay.
+    ///
+    /// Set to `0` to wait exactly the computed backoff delay.
+    public let reconnectionJitter: Double
     /// Allow sending duplicate messages. Important when reconnected. Defaults to true.
     public let allowSendingDuplicates: Bool
     ///  Whether the websocket connects immediately on creation.
@@ -108,6 +126,8 @@ public class WebSocketTransport {
       clientVersion: String = WebSocketTransport.defaultClientVersion,
       reconnect: Bool = true,
       reconnectionInterval: TimeInterval = 0.5,
+      maxReconnectionInterval: TimeInterval = 30,
+      reconnectionJitter: Double = 0.3,
       allowSendingDuplicates: Bool = true,
       connectOnInit: Bool = true,
       connectingPayload: JSONEncodableDictionary? = [:],
@@ -118,6 +138,8 @@ public class WebSocketTransport {
       self.clientVersion = clientVersion
       self._reconnect = Atomic(wrappedValue: reconnect)
       self.reconnectionInterval = reconnectionInterval
+      self.maxReconnectionInterval = maxReconnectionInterval
+      self.reconnectionJitter = reconnectionJitter
       self.allowSendingDuplicates = allowSendingDuplicates
       self.connectOnInit = connectOnInit
       self.connectingPayload = connectingPayload
@@ -256,6 +278,13 @@ public class WebSocketTransport {
 
       case .connectionAck:
         acked = true
+        // The reconnection backoff resets here, and not when the socket connects, because a
+        // `connectionAck` is the only proof the connection works end to end: we wrote a
+        // `connectionInit` and the server replied to it. A socket that connects and then fails on
+        // its first write reports a connection every time it is retried, so resetting on connect
+        // would clear the counter on every iteration of exactly the failure loop this backoff
+        // exists to slow down.
+        $consecutiveReconnectionAttempts.mutate { $0 = 0 }
         writeQueue()
 
       case .connectionKeepAlive,
@@ -442,6 +471,10 @@ public class WebSocketTransport {
   /// - Parameter autoReconnect: `true` if you want the websocket to automatically reconnect if the connection drops. Defaults to true.
   public func resumeWebSocketConnection(autoReconnect: Bool = true) {
     self.reconnect = autoReconnect
+    // A resume is a deliberate request for a connection right now, usually because something
+    // changed outside the socket's knowledge (the app foregrounded, the network came back), so it
+    // starts a fresh backoff rather than inheriting the delay accumulated before the pause.
+    self.$consecutiveReconnectionAttempts.mutate { $0 = 0 }
     self.websocket.connect()
   }
 }
@@ -597,12 +630,37 @@ extension WebSocketTransport: WebSocketClientDelegate {
     self.attemptReconnectionIfDesired()
   }
 
+  /// The delay to wait before the reconnection attempt that follows `attemptCount` earlier
+  /// consecutive attempts, applying the exponential backoff and jitter described by
+  /// `Configuration.reconnectionInterval`.
+  ///
+  /// non-private for testing - you should not use this directly
+  func reconnectionDelay(afterAttemptCount attemptCount: Int) -> TimeInterval {
+    // The exponent is clamped so that a long-running failure can't grow the multiplier to
+    // infinity, which would make the delay `NaN` for a base interval of zero.
+    let exponentialDelay = config.reconnectionInterval * pow(2, Double(min(attemptCount, 32)))
+    let cappedDelay = min(exponentialDelay, config.maxReconnectionInterval)
+
+    guard config.reconnectionJitter > 0 else {
+      return cappedDelay
+    }
+
+    let jitter = cappedDelay * config.reconnectionJitter
+    return max(0, cappedDelay + Double.random(in: -jitter...jitter))
+  }
+
   private func attemptReconnectionIfDesired() {
     guard self.reconnect else {
       return
     }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + config.reconnectionInterval) { [weak self] in
+    let attemptCount = self.$consecutiveReconnectionAttempts.mutate { attempts in
+      let attemptCount = attempts
+      attempts += 1
+      return attemptCount
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + reconnectionDelay(afterAttemptCount: attemptCount)) { [weak self] in
       guard let self = self else { return }
       self.$socketConnectionState.mutate { socketConnectionState in
         switch socketConnectionState {
