@@ -55,8 +55,17 @@ public class WebSocketTransport {
 
   @Atomic
   private var subscribers = [String: (Result<JSONObject, any Error>) -> Void]()
+  /// The live subscriptions by message id, each with how to re-establish it once the socket
+  /// reconnects — `nil` when its request context provides no `webSocketDidReconnect`.
   @Atomic
-  private var subscriptions : [String: String] = [:]
+  private var subscriptions: [String: Subscription] = [:]
+
+  private struct Subscription {
+    /// The subscribe frame as written, so a frame still queued for the next connection can be told
+    /// apart from one the old connection received.
+    let message: String
+    let didReconnect: (@Sendable () -> Void)?
+  }
   let processingQueue = DispatchQueue(label: "com.apollographql.WebSocketTransport")
 
   fileprivate var reconnected = false
@@ -112,8 +121,6 @@ public class WebSocketTransport {
     ///
     /// Set to `0` to wait exactly the computed backoff delay.
     public let reconnectionJitter: Double
-    /// Allow sending duplicate messages. Important when reconnected. Defaults to true.
-    public let allowSendingDuplicates: Bool
     ///  Whether the websocket connects immediately on creation.
     ///  If false, remember to call `resumeWebSocketConnection()` to connect.
     ///  Defaults to true.
@@ -133,7 +140,6 @@ public class WebSocketTransport {
       reconnectionInterval: TimeInterval = 0.5,
       maxReconnectionInterval: TimeInterval = 30,
       reconnectionJitter: Double = 0.3,
-      allowSendingDuplicates: Bool = true,
       connectOnInit: Bool = true,
       connectingPayload: JSONEncodableDictionary? = [:],
       requestBodyCreator: any RequestBodyCreator = ApolloRequestBodyCreator(),
@@ -145,7 +151,6 @@ public class WebSocketTransport {
       self.reconnectionInterval = reconnectionInterval
       self.maxReconnectionInterval = maxReconnectionInterval
       self.reconnectionJitter = reconnectionJitter
-      self.allowSendingDuplicates = allowSendingDuplicates
       self.connectOnInit = connectOnInit
       self.connectingPayload = connectingPayload
       self.requestBodyCreator = requestBodyCreator
@@ -386,7 +391,11 @@ public class WebSocketTransport {
     self.websocket.delegate = nil
   }
 
-  func sendHelper<Operation: GraphQLOperation>(operation: Operation, resultHandler: @escaping (_ result: Result<JSONObject, any Error>) -> Void) -> String? {
+  func sendHelper<Operation: GraphQLOperation>(
+    operation: Operation,
+    didReconnect: (@Sendable () -> Void)?,
+    resultHandler: @escaping (_ result: Result<JSONObject, any Error>) -> Void
+  ) -> String? {
     let body = config.requestBodyCreator.requestBody(for: operation,
                                               sendQueryDocument: true,
                                               autoPersistQuery: false)
@@ -408,7 +417,9 @@ public class WebSocketTransport {
 
       self.$subscribers.mutate { $0[identifier] = resultHandler }
       if Operation.operationType == .subscription {
-        self.$subscriptions.mutate { $0[identifier] = message }
+        self.$subscriptions.mutate {
+          $0[identifier] = Subscription(message: message, didReconnect: didReconnect)
+        }
       }
     }
 
@@ -461,9 +472,9 @@ public class WebSocketTransport {
     self.reconnect = oldReconnectValue
   }
   
-  /// Disconnects the websocket while setting the auto-reconnect value to false,
-  /// allowing purposeful disconnects that do not dump existing subscriptions.
-  /// NOTE: You will receive an error on the subscription when the socket disconnects.
+  /// Disconnects the websocket while setting the auto-reconnect value to false, for a purposeful
+  /// disconnect. Subscriptions are not notified of the pause. Once the connection resumes, each is
+  /// forgotten and, if its request context provides `webSocketDidReconnect`, asked to subscribe again.
   /// ALSO NOTE: In case pauseWebSocketConnection is called when app is backgrounded, app might get suspended within 5 seconds. In case disconnect did not complete within that time, websocket won't resume properly. That is why forceTimeout is set to 2 seconds.
   /// ALSO NOTE: To reconnect after calling this, you will need to call `resumeWebSocketConnection`.
   public func pauseWebSocketConnection() {
@@ -520,7 +531,11 @@ extension WebSocketTransport: NetworkTransport {
       return EmptyCancellable()
     }
 
-    return WebSocketTask(self, operation) { [weak store, contextIdentifier, callbackQueue] result in
+    return WebSocketTask(
+      self,
+      operation,
+      didReconnect: context?.webSocketDidReconnect
+    ) { [weak store, contextIdentifier, callbackQueue] result in
       switch result {
       case .success(let jsonBody):
         do {
@@ -574,16 +589,25 @@ extension WebSocketTransport: WebSocketClientDelegate {
     initServer()
     if self.reconnected {
       self.delegate?.webSocketTransportDidReconnect(self)
-      // re-send the subscriptions whenever we are re-connected
-      // for the first connect, any subscriptions are already in queue
-      for (_, msg) in self.subscriptions {
-        if self.config.allowSendingDuplicates {
-          write(msg)
-        } else {
-          // search duplicate message from the queue
-          let id = queue.first { $0.value == msg }?.key
-          write(msg, id: id)
+      // The server dropped every subscription with the old connection, so the ones remembered
+      // here are over — except a subscribe still queued for this connection, which `writeQueue`
+      // sends once the server acknowledges it. Forget the rest, and let each owner that asked
+      // subscribe again from its current state.
+      let pendingMessages = Set(self.queue.values)
+      let endedSubscriptions = self.$subscriptions.mutate { subscriptions in
+        let ended = subscriptions.filter { !pendingMessages.contains($0.value.message) }
+        for id in ended.keys {
+          subscriptions.removeValue(forKey: id)
         }
+        return ended
+      }
+      self.$subscribers.mutate { subscribers in
+        for id in endedSubscriptions.keys {
+          subscribers.removeValue(forKey: id)
+        }
+      }
+      for subscription in endedSubscriptions.values {
+        subscription.didReconnect?()
       }
     } else {
       self.delegate?.webSocketTransportDidConnect(self)
