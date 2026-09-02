@@ -9,7 +9,22 @@ import ApolloAPI
 ///
 /// This allows the various interceptors to make modifications, or perform actions, with information
 /// that they cannot get just from the existing operation. It can be anything that conforms to this protocol.
-public protocol RequestContext {}
+public protocol RequestContext {
+  /// Called by `WebSocketTransport` once the socket carrying this request's subscription has
+  /// reconnected. The server dropped every subscription with the old connection, and the transport
+  /// has forgotten this one rather than re-send the frame it first wrote — that would subscribe
+  /// again from the state the operation had *then*, a stale position for a subscription that
+  /// resumes from a cursor. Subscribe again from here, from your own current state. Called on the
+  /// transport's processing queue; the original `Cancellable` is inert by then.
+  ///
+  /// `nil`, the default, means a subscription sent with this context is forgotten on reconnect and
+  /// receives nothing further. Queries and mutations never consult it.
+  var webSocketDidReconnect: (@Sendable () -> Void)? { get }
+}
+
+extension RequestContext {
+  public var webSocketDidReconnect: (@Sendable () -> Void)? { nil }
+}
 
 /// A request context specialization protocol that specifies options for configuring the timeout of a `URLRequest`.
 ///

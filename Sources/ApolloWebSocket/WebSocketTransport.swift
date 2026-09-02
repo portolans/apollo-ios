@@ -56,7 +56,7 @@ public class WebSocketTransport {
   @Atomic
   private var subscribers = [String: (Result<JSONObject, any Error>) -> Void]()
   /// The live subscriptions by message id, each with how to re-establish it once the socket
-  /// reconnects — `nil` when its request context is not `WebSocketReconnectHandling`.
+  /// reconnects — `nil` when its request context provides no `webSocketDidReconnect`.
   @Atomic
   private var subscriptions: [String: Subscription] = [:]
 
@@ -393,7 +393,7 @@ public class WebSocketTransport {
 
   func sendHelper<Operation: GraphQLOperation>(
     operation: Operation,
-    reconnectHandling: (any WebSocketReconnectHandling)?,
+    didReconnect: (@Sendable () -> Void)?,
     resultHandler: @escaping (_ result: Result<JSONObject, any Error>) -> Void
   ) -> String? {
     let body = config.requestBodyCreator.requestBody(for: operation,
@@ -418,7 +418,7 @@ public class WebSocketTransport {
       self.$subscribers.mutate { $0[identifier] = resultHandler }
       if Operation.operationType == .subscription {
         self.$subscriptions.mutate {
-          $0[identifier] = Subscription(message: message, didReconnect: reconnectHandling?.didReconnect)
+          $0[identifier] = Subscription(message: message, didReconnect: didReconnect)
         }
       }
     }
@@ -474,7 +474,7 @@ public class WebSocketTransport {
   
   /// Disconnects the websocket while setting the auto-reconnect value to false, for a purposeful
   /// disconnect. Subscriptions are not notified of the pause. Once the connection resumes, each is
-  /// forgotten and, if its request context is `WebSocketReconnectHandling`, asked to subscribe again.
+  /// forgotten and, if its request context provides `webSocketDidReconnect`, asked to subscribe again.
   /// ALSO NOTE: In case pauseWebSocketConnection is called when app is backgrounded, app might get suspended within 5 seconds. In case disconnect did not complete within that time, websocket won't resume properly. That is why forceTimeout is set to 2 seconds.
   /// ALSO NOTE: To reconnect after calling this, you will need to call `resumeWebSocketConnection`.
   public func pauseWebSocketConnection() {
@@ -534,7 +534,7 @@ extension WebSocketTransport: NetworkTransport {
     return WebSocketTask(
       self,
       operation,
-      reconnectHandling: context as? any WebSocketReconnectHandling
+      didReconnect: context?.webSocketDidReconnect
     ) { [weak store, contextIdentifier, callbackQueue] result in
       switch result {
       case .success(let jsonBody):
