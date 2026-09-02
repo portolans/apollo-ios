@@ -393,7 +393,7 @@ public class WebSocketTransport {
 
   func sendHelper<Operation: GraphQLOperation>(
     operation: Operation,
-    context: (any RequestContext)?,
+    reconnectHandling: (any WebSocketReconnectHandling)?,
     resultHandler: @escaping (_ result: Result<JSONObject, any Error>) -> Void
   ) -> String? {
     let body = config.requestBodyCreator.requestBody(for: operation,
@@ -417,9 +417,8 @@ public class WebSocketTransport {
 
       self.$subscribers.mutate { $0[identifier] = resultHandler }
       if Operation.operationType == .subscription {
-        let didReconnect = (context as? any WebSocketReconnectHandling)?.didReconnect
         self.$subscriptions.mutate {
-          $0[identifier] = Subscription(message: message, didReconnect: didReconnect)
+          $0[identifier] = Subscription(message: message, didReconnect: reconnectHandling?.didReconnect)
         }
       }
     }
@@ -532,7 +531,11 @@ extension WebSocketTransport: NetworkTransport {
       return EmptyCancellable()
     }
 
-    return WebSocketTask(self, operation, context: context) { [weak store, contextIdentifier, callbackQueue] result in
+    return WebSocketTask(
+      self,
+      operation,
+      reconnectHandling: context as? any WebSocketReconnectHandling
+    ) { [weak store, contextIdentifier, callbackQueue] result in
       switch result {
       case .success(let jsonBody):
         do {
