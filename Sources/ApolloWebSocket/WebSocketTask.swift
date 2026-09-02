@@ -13,11 +13,13 @@ final class WebSocketTask<Operation: GraphQLOperation>: Cancellable {
   ///
   /// - Parameter ws: The `WebSocketTransport` to use for this task
   /// - Parameter operation: The `GraphQLOperation` to use
+  /// - Parameter context: The request context, consulted for `WebSocketReconnectHandling`.
   /// - Parameter completionHandler: A completion handler to fire when the operation has a result.
   init(_ ws: WebSocketTransport,
        _ operation: Operation,
+       context: (any RequestContext)?,
        _ completionHandler: @escaping (_ result: Result<JSONObject, any Error>) -> Void) {
-    sequenceNumber = ws.sendHelper(operation: operation, resultHandler: completionHandler)
+    sequenceNumber = ws.sendHelper(operation: operation, context: context, resultHandler: completionHandler)
     transport = ws
   }
 
