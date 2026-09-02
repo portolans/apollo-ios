@@ -9,6 +9,37 @@ public protocol SOCKSProxyable {
 	var enableSOCKSProxy: Bool { get set }
 }
 
+// MARK: - WebSocketClosedByPeerError
+
+/// The peer closed the WebSocket while we still considered it live.
+///
+/// Surfaced as an error so subscribers hear about it. A close is not a failure of the socket
+/// layer — the transport reconnects either way — but it IS the end of every subscription that was
+/// running on it, and only the subscriber can re-establish those against its own current state. A
+/// close reported as a clean shutdown leaves them believing they are still subscribed, so events
+/// after it are lost with nothing to notice.
+///
+/// Carries the code and reason because they say what to do: a `graphql-transport-ws` server closes
+/// with 4400-series codes for protocol and auth problems (4408 for a missing `connection_init`,
+/// 4401 unauthorized), which a caller may want to treat differently from a transport-level close.
+public struct WebSocketClosedByPeerError: Error, CustomStringConvertible {
+	/// The RFC 6455 close code the peer sent.
+	public let closeCode: URLSessionWebSocketTask.CloseCode
+	/// The peer's reason phrase, when it sent one and it decoded as UTF-8.
+	public let reason: String?
+
+	public init(closeCode: URLSessionWebSocketTask.CloseCode, reason: String?) {
+		self.closeCode = closeCode
+		self.reason = reason
+	}
+
+	public var description: String {
+		let code = "WebSocket closed by peer (code \(closeCode.rawValue)"
+		guard let reason, !reason.isEmpty else { return code + ")" }
+		return code + ": \(reason))"
+	}
+}
+
 // MARK: - WSProtocol
 
 /// The GraphQL over WebSocket protocols supported by apollo-ios.
@@ -299,7 +330,17 @@ extension URLSessionWebSocket: URLSessionWebSocketDelegate {
 		didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
 		reason: Data?
 	) {
-		cleanupSession(session, error: nil)
+		// Report the close rather than treating it as a clean shutdown. `cleanupSession` ignores a
+		// session we already replaced, and `disconnect()` clears `state.session` before its own
+		// close handshake — so anything arriving here for the CURRENT session was closed by the
+		// peer, not by us, and subscribers need to hear about it.
+		cleanupSession(
+			session,
+			error: WebSocketClosedByPeerError(
+				closeCode: closeCode,
+				reason: reason.flatMap { String(data: $0, encoding: .utf8) }
+			)
+		)
 	}
 
 	public func urlSession(
