@@ -26,7 +26,12 @@ public protocol WebSocketClient: AnyObject {
   func disconnect(forceTimeout: TimeInterval?)
 
   /// Writes ping data to the websocket.
-  func write(ping: Data, completion: (() -> Void)?)
+  ///
+  /// - Parameter completion: Called with `nil` once the peer's pong arrives, or with the error if the
+  ///   ping could not be sent — including when no socket is currently open. Never called if the
+  ///   socket is half-open: the frame is written but no pong ever comes, so a caller probing for
+  ///   liveness must bound its own wait.
+  func write(ping: Data, completion: (((any Error)?) -> Void)?)
 
   /// Writes a string to the websocket.
   func write(string: String)

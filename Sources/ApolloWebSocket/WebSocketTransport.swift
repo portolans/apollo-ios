@@ -232,7 +232,10 @@ public class WebSocketTransport {
     return self.socketConnectionState.isConnected
   }
 
-  public func ping(data: Data, completionHandler: (() -> Void)? = nil) {
+  /// Sends a WebSocket-level ping. `completionHandler` receives `nil` once the pong arrives, or the
+  /// error if the ping could not be sent (including when no socket is open). A half-open socket
+  /// never completes — see `WebSocketClient.write(ping:completion:)` — so bound the wait.
+  public func ping(data: Data, completionHandler: (((any Error)?) -> Void)? = nil) {
     return websocket.write(ping: data, completion: completionHandler)
   }
 
