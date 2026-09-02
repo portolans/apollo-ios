@@ -40,6 +40,16 @@ public struct WebSocketClosedByPeerError: Error, CustomStringConvertible {
 	}
 }
 
+// MARK: - WebSocketNotConnectedError
+
+/// A write was attempted while no socket was open — after `disconnect()`, or before `connect()`
+/// has produced a task.
+public struct WebSocketNotConnectedError: Error, CustomStringConvertible {
+	public init() {}
+
+	public var description: String { "WebSocket is not connected" }
+}
+
 // MARK: - WSProtocol
 
 /// The GraphQL over WebSocket protocols supported by apollo-ios.
@@ -234,13 +244,17 @@ public final class URLSessionWebSocket: NSObject, WebSocketClient, SOCKSProxyabl
 		}
 	}
 
-	public func write(ping: Data, completion: (() -> Void)? = nil) {
+	public func write(ping: Data, completion: (((any Error)?) -> Void)? = nil) {
 		// URLSessionWebSocketTask.sendPing does not support custom ping payloads.
 		// Apollo never sends non-empty pings – this assert guards against future misuse.
 		assert(ping.isEmpty, "URLSessionWebSocketTask does not support custom ping payloads")
 		let currentTask: URLSessionWebSocketTask? = state.withLock { $0.task }
-		currentTask?.sendPing { _ in
-			completion?()
+		guard let currentTask else {
+			completion?(WebSocketNotConnectedError())
+			return
+		}
+		currentTask.sendPing { error in
+			completion?(error)
 		}
 	}
 
