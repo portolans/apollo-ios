@@ -47,13 +47,24 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   @Atomic private var tasks: [Int: TaskData] = [:]
   
+  /// The session and whether it has been invalidated, read and written together: a task must never be
+  /// created on a session that `invalidate()` has already been asked to cancel, and `session` is
+  /// written from the delegate queue while `sendRequest` reads it from any thread.
+  private struct SessionState {
+    var session: URLSession?
+    var hasBeenInvalidated = false
+  }
+  
+  @Atomic private var sessionState = SessionState()
+  
   /// The raw URLSession being used for this client
-  open private(set) var session: URLSession!
+  open private(set) var session: URLSession! {
+    get { self.sessionState.session }
+    set { self.$sessionState.mutate { $0.session = newValue } }
+  }
   
-  @Atomic private var hasBeenInvalidated: Bool = false
-  
-  private var hasNotBeenInvalidated: Bool {
-    !self.hasBeenInvalidated
+  private var hasBeenInvalidated: Bool {
+    self.sessionState.hasBeenInvalidated
   }
   
   /// Designated initializer.
@@ -79,13 +90,14 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   /// NOTE: This must be called from the `deinit` of anything holding onto this client in order to break a retain cycle with the delegate.
   public func invalidate() {
     // Idempotent: the session reference stays until the session reports itself invalid, so a second
-    // call in that window must not invalidate it again.
-    let wasAlreadyInvalidated = self.$hasBeenInvalidated.mutate { flag -> Bool in
-      let previous = flag
-      flag = true
-      return previous
+    // call in that window must not invalidate it again. Flipping the flag under the same lock that
+    // `sendRequest` creates tasks under means no task is created on the session after this point.
+    let session: URLSession? = self.$sessionState.mutate { state in
+      guard !state.hasBeenInvalidated else { return nil }
+      state.hasBeenInvalidated = true
+      return state.session
     }
-    guard !wasAlreadyInvalidated, let session = self.session else {
+    guard let session else {
       return
     }
 
@@ -129,12 +141,16 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
                         taskDescription: String? = nil,
                         rawTaskCompletionHandler: RawCompletion? = nil,
                         completion: @escaping Completion) -> URLSessionTask {
-    guard self.hasNotBeenInvalidated else {
+    // Created under the lock so the invalidated check and the creation are one step: a task created
+    // on a session that has already been asked to invalidate raises inside Foundation.
+    let createdTask: URLSessionTask? = self.$sessionState.mutate { state in
+      guard !state.hasBeenInvalidated, let session = state.session else { return nil }
+      return session.dataTask(with: request)
+    }
+    guard let task = createdTask else {
       completion(.failure(URLSessionClientError.sessionInvalidated))
       return URLSessionTask()
     }
-    
-    let task = self.session.dataTask(with: request)
     task.taskDescription = taskDescription
       
     let taskData = TaskData(rawCompletion: rawTaskCompletionHandler,
@@ -174,17 +190,19 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   /// Fails every pending task, releases the task references, and drops the session. This is the one
   /// place cleanup happens after `invalidate()`, so a subclass that overrides it must call `super`.
   open func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
-    // The session may have invalidated itself rather than through `invalidate()`; either way no new
-    // request can be created on it.
-    self.$hasBeenInvalidated.mutate { $0 = true }
     let finalError = error ?? URLSessionClientError.sessionBecameInvalidWithoutUnderlyingError
     for task in self.tasks.values {
       task.completionBlock(.failure(finalError))
     }
     
     self.clearAllTasks()
-    // The session has finished cancelling its tasks, so this is the first safe moment to drop it.
-    self.session = nil
+    // The session has finished cancelling its tasks, so this is the first safe moment to drop it. It
+    // may have invalidated itself rather than through `invalidate()`; either way no new request can
+    // be created on it.
+    self.$sessionState.mutate {
+      $0.hasBeenInvalidated = true
+      $0.session = nil
+    }
   }
   
   open func urlSession(_ session: URLSession,
