@@ -121,7 +121,8 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   /// Removes and returns a task's bookkeeping. Whoever removes the entry owns its completion, so a
   /// task can never be completed twice by the completion delegate, the invalidation sweep, and
-  /// `sendRequest` racing each other.
+  /// `sendRequest` racing each other. Callers still call `clear(task:)` afterwards so a subclass
+  /// that overrides it to drop its own bookkeeping keeps hearing about every completed task.
   private func takeTask(_ identifier: Int) -> TaskData? {
     self.$tasks.mutate { $0.removeValue(forKey: identifier) }
   }
@@ -173,6 +174,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     // already cancelled the task, and the sweep in the invalidation callback may already have run
     // against a table that did not yet hold this entry, so nothing else would ever complete it.
     if self.hasBeenInvalidated, let orphaned = self.takeTask(task.taskIdentifier) {
+      self.clear(task: task.taskIdentifier)
       orphaned.completionBlock(.failure(URLSessionClientError.sessionInvalidated))
     } else {
       task.resume()
@@ -221,6 +223,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
       tasks.removeAll()
       return all
     }
+    self.clearAllTasks()
     for task in pending.values {
       task.completionBlock(.failure(finalError))
     }
@@ -265,6 +268,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
       // No completion blocks, the task has likely been cancelled. Bail out.
       return
     }
+    self.clear(task: task.taskIdentifier)
     
     let data = taskData.data
     let response = taskData.response
