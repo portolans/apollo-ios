@@ -78,10 +78,14 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   ///
   /// NOTE: This must be called from the `deinit` of anything holding onto this client in order to break a retain cycle with the delegate.
   public func invalidate() {
-    self.$hasBeenInvalidated.mutate { $0 = true }
-    guard let session = self.session else {
-      // Session's already gone, just cleanup.
-      self.clearAllTasks()
+    // Idempotent: the session reference stays until the session reports itself invalid, so a second
+    // call in that window must not invalidate it again.
+    let wasAlreadyInvalidated = self.$hasBeenInvalidated.mutate { flag -> Bool in
+      let previous = flag
+      flag = true
+      return previous
+    }
+    guard !wasAlreadyInvalidated, let session = self.session else {
       return
     }
 
@@ -167,6 +171,8 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   // MARK: - URLSessionDelegate
   
+  /// Fails every pending task, releases the task references, and drops the session. This is the one
+  /// place cleanup happens after `invalidate()`, so a subclass that overrides it must call `super`.
   open func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
     // The session may have invalidated itself rather than through `invalidate()`; either way no new
     // request can be created on it.
