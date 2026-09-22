@@ -194,19 +194,19 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   /// Fails every pending task, releases the task references, and drops the session. This is the one
   /// place cleanup happens after `invalidate()`, so a subclass that overrides it must call `super`.
   open func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+    // The session has finished cancelling its tasks, so this is the first safe moment to drop it. It
+    // may have invalidated itself rather than through `invalidate()`; either way no new request can be
+    // created on it, and that has to be true before a failed completion below gets a chance to retry.
+    self.$sessionState.mutate {
+      $0.hasBeenInvalidated = true
+      $0.session = nil
+    }
     let finalError = error ?? URLSessionClientError.sessionBecameInvalidWithoutUnderlyingError
     for task in self.tasks.values {
       task.completionBlock(.failure(finalError))
     }
     
     self.clearAllTasks()
-    // The session has finished cancelling its tasks, so this is the first safe moment to drop it. It
-    // may have invalidated itself rather than through `invalidate()`; either way no new request can
-    // be created on it.
-    self.$sessionState.mutate {
-      $0.hasBeenInvalidated = true
-      $0.session = nil
-    }
   }
   
   open func urlSession(_ session: URLSession,
