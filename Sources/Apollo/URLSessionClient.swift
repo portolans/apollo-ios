@@ -47,13 +47,25 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   @Atomic private var tasks: [Int: TaskData] = [:]
   
-  /// The raw URLSession being used for this client
-  open private(set) var session: URLSession!
+  /// The session and whether it has been invalidated, read and written together: a task must never be
+  /// created on a session that `invalidate()` has already been asked to cancel, and `session` is
+  /// written from the delegate queue while `sendRequest` reads it from any thread.
+  private struct SessionState {
+    var session: URLSession?
+    var hasBeenInvalidated = false
+  }
   
-  @Atomic private var hasBeenInvalidated: Bool = false
+  @Atomic private var sessionState = SessionState()
   
-  private var hasNotBeenInvalidated: Bool {
-    !self.hasBeenInvalidated
+  /// The raw URLSession being used for this client; nil once the session has reported itself invalid.
+  /// Not overridable: this client is the session's delegate, so no other session could drive it.
+  public private(set) var session: URLSession? {
+    get { self.sessionState.session }
+    set { self.$sessionState.mutate { $0.session = newValue } }
+  }
+  
+  private var hasBeenInvalidated: Bool {
+    self.sessionState.hasBeenInvalidated
   }
   
   /// Designated initializer.
@@ -76,22 +88,29 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   /// Cleans up and invalidates everything related to this session client.
   ///
+  /// Returns as soon as the session has been asked to cancel; the pending completions fail, the task
+  /// references are released, and the session is dropped when `urlSession(_:didBecomeInvalidWithError:)`
+  /// runs on the delegate queue, so a client whose delegate queue is blocked stays alive until it drains.
+  ///
   /// NOTE: This must be called from the `deinit` of anything holding onto this client in order to break a retain cycle with the delegate.
   public func invalidate() {
-    self.$hasBeenInvalidated.mutate { $0 = true }
-    func cleanup() {
-      self.session = nil
-      self.clearAllTasks()
+    // Idempotent: the session reference stays until the session reports itself invalid, so a second
+    // call in that window must not invalidate it again. Flipping the flag under the same lock that
+    // `sendRequest` creates tasks under means no task is created on the session after this point.
+    let session: URLSession? = self.$sessionState.mutate { state in
+      guard !state.hasBeenInvalidated else { return nil }
+      state.hasBeenInvalidated = true
+      return state.session
     }
-
-    guard let session = self.session else {
-      // Session's already gone, just cleanup.
-      cleanup()
+    guard let session else {
       return
     }
 
+    // Cancellation is asynchronous: the session cancels each task and then calls
+    // `urlSession(_:didBecomeInvalidWithError:)`, which is where the task references are released.
+    // Releasing them here, while those cancellations are still in flight, has crashed on a freed
+    // `URLSessionTask` (`-[NSURLSessionTask _onqueue_cancel]: unrecognized selector`).
     session.invalidateAndCancel()
-    cleanup()
   }
   
   /// Clears underlying dictionaries of any data related to a particular task identifier.
@@ -99,6 +118,14 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   /// - Parameter identifier: The identifier of the task to clear.
   open func clear(task identifier: Int) {
     self.$tasks.mutate { _ = $0.removeValue(forKey: identifier) }
+  }
+  
+  /// Removes and returns a task's bookkeeping. Whoever removes the entry owns its completion, so a
+  /// task can never be completed twice by the completion delegate, the invalidation sweep, and
+  /// `sendRequest` racing each other. Callers still call `clear(task:)` afterwards so a subclass
+  /// that overrides it to drop its own bookkeeping keeps hearing about every completed task.
+  private func takeTask(_ identifier: Int) -> TaskData? {
+    self.$tasks.mutate { $0.removeValue(forKey: identifier) }
   }
   
   /// Clears underlying dictionaries of any data related to all tasks.
@@ -127,12 +154,16 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
                         taskDescription: String? = nil,
                         rawTaskCompletionHandler: RawCompletion? = nil,
                         completion: @escaping Completion) -> URLSessionTask {
-    guard self.hasNotBeenInvalidated else {
+    // Created under the lock so the invalidated check and the creation are one step: a task created
+    // on a session that has already been asked to invalidate raises inside Foundation.
+    let createdTask: URLSessionTask? = self.$sessionState.mutate { state in
+      guard !state.hasBeenInvalidated, let session = state.session else { return nil }
+      return session.dataTask(with: request)
+    }
+    guard let task = createdTask else {
       completion(.failure(URLSessionClientError.sessionInvalidated))
       return URLSessionTask()
     }
-    
-    let task = self.session.dataTask(with: request)
     task.taskDescription = taskDescription
       
     let taskData = TaskData(rawCompletion: rawTaskCompletionHandler,
@@ -140,7 +171,15 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     
     self.$tasks.mutate { $0[task.taskIdentifier] = taskData }
     
-    task.resume()
+    // Invalidation may have run between creating the task and registering it: the session has
+    // already cancelled the task, and the sweep in the invalidation callback may already have run
+    // against a table that did not yet hold this entry, so nothing else would ever complete it.
+    if self.hasBeenInvalidated, let orphaned = self.takeTask(task.taskIdentifier) {
+      self.clear(task: task.taskIdentifier)
+      orphaned.completionBlock(.failure(URLSessionClientError.sessionInvalidated))
+    } else {
+      task.resume()
+    }
     
     return task
   }
@@ -169,13 +208,29 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   // MARK: - URLSessionDelegate
   
+  /// Fails every pending task, releases the task references, and drops the session. This is the one
+  /// place cleanup happens after `invalidate()`, so a subclass that overrides it must call `super`.
   open func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+    // The session has finished cancelling its tasks, so this is the first safe moment to drop it. It
+    // may have invalidated itself rather than through `invalidate()`; either way no new request can be
+    // created on it, and that has to be true before a failed completion below gets a chance to retry.
+    self.$sessionState.mutate {
+      $0.hasBeenInvalidated = true
+      $0.session = nil
+    }
     let finalError = error ?? URLSessionClientError.sessionBecameInvalidWithoutUnderlyingError
-    for task in self.tasks.values {
+    let pending = self.$tasks.mutate { tasks -> [Int: TaskData] in
+      let all = tasks
+      tasks.removeAll()
+      return all
+    }
+    // Per task rather than `clearAllTasks()`: a bulk removal here could swallow an entry that
+    // `sendRequest` registered after the claim above, and nothing would ever complete it. Task
+    // identifiers are unique within a session, so clearing a claimed one can only touch its own entry.
+    for (identifier, task) in pending {
+      self.clear(task: identifier)
       task.completionBlock(.failure(finalError))
     }
-    
-    self.clearAllTasks()
   }
   
   open func urlSession(_ session: URLSession,
@@ -213,14 +268,11 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   open func urlSession(_ session: URLSession,
                        task: URLSessionTask,
                        didCompleteWithError error: (any Error)?) {
-    defer {
-      self.clear(task: task.taskIdentifier)
-    }
-    
-    guard let taskData = self.tasks[task.taskIdentifier] else {
+    guard let taskData = self.takeTask(task.taskIdentifier) else {
       // No completion blocks, the task has likely been cancelled. Bail out.
       return
     }
+    self.clear(task: task.taskIdentifier)
     
     let data = taskData.data
     let response = taskData.response
