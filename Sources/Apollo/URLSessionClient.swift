@@ -174,10 +174,9 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     // against a table that did not yet hold this entry, so nothing else would ever complete it.
     if self.hasBeenInvalidated, let orphaned = self.takeTask(task.taskIdentifier) {
       orphaned.completionBlock(.failure(URLSessionClientError.sessionInvalidated))
-      return task
+    } else {
+      task.resume()
     }
-    
-    task.resume()
     
     return task
   }
