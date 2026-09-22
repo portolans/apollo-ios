@@ -119,6 +119,13 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     self.$tasks.mutate { _ = $0.removeValue(forKey: identifier) }
   }
   
+  /// Removes and returns a task's bookkeeping. Whoever removes the entry owns its completion, so a
+  /// task can never be completed twice by the completion delegate, the invalidation sweep, and
+  /// `sendRequest` racing each other.
+  private func takeTask(_ identifier: Int) -> TaskData? {
+    self.$tasks.mutate { $0.removeValue(forKey: identifier) }
+  }
+  
   /// Clears underlying dictionaries of any data related to all tasks.
   ///
   /// Mostly useful for cleanup and/or after invalidation of the `URLSession`.
@@ -162,6 +169,14 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
     
     self.$tasks.mutate { $0[task.taskIdentifier] = taskData }
     
+    // Invalidation may have run between creating the task and registering it: the session has
+    // already cancelled the task, and the sweep in the invalidation callback may already have run
+    // against a table that did not yet hold this entry, so nothing else would ever complete it.
+    if self.hasBeenInvalidated, let orphaned = self.takeTask(task.taskIdentifier) {
+      orphaned.completionBlock(.failure(URLSessionClientError.sessionInvalidated))
+      return task
+    }
+    
     task.resume()
     
     return task
@@ -202,11 +217,14 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
       $0.session = nil
     }
     let finalError = error ?? URLSessionClientError.sessionBecameInvalidWithoutUnderlyingError
-    for task in self.tasks.values {
+    let pending = self.$tasks.mutate { tasks -> [Int: TaskData] in
+      let all = tasks
+      tasks.removeAll()
+      return all
+    }
+    for task in pending.values {
       task.completionBlock(.failure(finalError))
     }
-    
-    self.clearAllTasks()
   }
   
   open func urlSession(_ session: URLSession,
@@ -244,11 +262,7 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   open func urlSession(_ session: URLSession,
                        task: URLSessionTask,
                        didCompleteWithError error: (any Error)?) {
-    defer {
-      self.clear(task: task.taskIdentifier)
-    }
-    
-    guard let taskData = self.tasks[task.taskIdentifier] else {
+    guard let taskData = self.takeTask(task.taskIdentifier) else {
       // No completion blocks, the task has likely been cancelled. Bail out.
       return
     }
