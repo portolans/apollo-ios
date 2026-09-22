@@ -223,8 +223,11 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
       tasks.removeAll()
       return all
     }
-    self.clearAllTasks()
-    for task in pending.values {
+    // Per task rather than `clearAllTasks()`: a bulk removal here could swallow an entry that
+    // `sendRequest` registered after the claim above, and nothing would ever complete it. Task
+    // identifiers are unique within a session, so clearing a claimed one can only touch its own entry.
+    for (identifier, task) in pending {
+      self.clear(task: identifier)
       task.completionBlock(.failure(finalError))
     }
   }
