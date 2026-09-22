@@ -57,8 +57,8 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   @Atomic private var sessionState = SessionState()
   
-  /// The raw URLSession being used for this client
-  open private(set) var session: URLSession! {
+  /// The raw URLSession being used for this client; nil once the session has reported itself invalid.
+  open private(set) var session: URLSession? {
     get { self.sessionState.session }
     set { self.$sessionState.mutate { $0.session = newValue } }
   }
