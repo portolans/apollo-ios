@@ -87,6 +87,10 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   
   /// Cleans up and invalidates everything related to this session client.
   ///
+  /// Returns as soon as the session has been asked to cancel; the pending completions fail, the task
+  /// references are released, and the session is dropped when `urlSession(_:didBecomeInvalidWithError:)`
+  /// runs on the delegate queue, so a client whose delegate queue is blocked stays alive until it drains.
+  ///
   /// NOTE: This must be called from the `deinit` of anything holding onto this client in order to break a retain cycle with the delegate.
   public func invalidate() {
     // Idempotent: the session reference stays until the session reports itself invalid, so a second
