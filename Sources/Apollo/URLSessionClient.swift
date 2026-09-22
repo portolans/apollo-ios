@@ -79,19 +79,17 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   /// NOTE: This must be called from the `deinit` of anything holding onto this client in order to break a retain cycle with the delegate.
   public func invalidate() {
     self.$hasBeenInvalidated.mutate { $0 = true }
-    func cleanup() {
-      self.session = nil
-      self.clearAllTasks()
-    }
-
     guard let session = self.session else {
       // Session's already gone, just cleanup.
-      cleanup()
+      self.clearAllTasks()
       return
     }
 
+    // Cancellation is asynchronous: the session cancels each task and then calls
+    // `urlSession(_:didBecomeInvalidWithError:)`, which is where the task references are released.
+    // Releasing them here, while those cancellations are still in flight, has crashed on a freed
+    // `URLSessionTask` (`-[NSURLSessionTask _onqueue_cancel]: unrecognized selector`).
     session.invalidateAndCancel()
-    cleanup()
   }
   
   /// Clears underlying dictionaries of any data related to a particular task identifier.
@@ -170,12 +168,17 @@ open class URLSessionClient: NSObject, URLSessionDelegate, URLSessionTaskDelegat
   // MARK: - URLSessionDelegate
   
   open func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+    // The session may have invalidated itself rather than through `invalidate()`; either way no new
+    // request can be created on it.
+    self.$hasBeenInvalidated.mutate { $0 = true }
     let finalError = error ?? URLSessionClientError.sessionBecameInvalidWithoutUnderlyingError
     for task in self.tasks.values {
       task.completionBlock(.failure(finalError))
     }
     
     self.clearAllTasks()
+    // The session has finished cancelling its tasks, so this is the first safe moment to drop it.
+    self.session = nil
   }
   
   open func urlSession(_ session: URLSession,
